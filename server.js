@@ -25,7 +25,7 @@ app.use((req, res, next) => {
 app.use('/images', express.static(path.join(__dirname, 'generated_images')));
 
 var corsOptions = {
-    origin: ['https://muse-fe.vercel.app'],
+    origin: ['https://muse-fe.vercel.app', 'http://localhost:3000'],
     optionsSuccessStatus: 200,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -167,7 +167,7 @@ const generateOwnershipCard = async (userName, tokenId, outputPath) => {
         ctx.fillText(userName.toUpperCase(), nameX, textY);
         
         // Format token ID as #00001, #00010, #00500, etc.
-        const formattedTokenId = tokenId ? `#${tokenId.toString().padStart(5, '0')}` : '#00000';
+        const formattedTokenId = tokenId ? `Card #${tokenId.toString().padStart(5, '0')}` : 'Card #00000';
         
         // Draw the token ID (right-aligned)
         ctx.textAlign = 'right';
