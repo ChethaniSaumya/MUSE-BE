@@ -1213,9 +1213,24 @@ const generateOwnershipCard = async (userName, tokenId, outputPath) => {
 };
 
 // Store user data endpoint with image generation and IPFS upload
+// Replace the entire /api/users POST endpoint in your server.js with this:
+
 app.post('/api/users', cors(corsOptions), async (req, res) => {
     try {
-        const { name, email, walletAddress, transactionHash, tokenId, nftMinted, mintedAt } = req.body;
+        const { 
+            name, 
+            email, 
+            walletAddress, 
+            transactionHash, 
+            tokenId, 
+            nftMinted, 
+            mintedAt, 
+            ageConfirmed, 
+            termsAccepted,
+            subscribe 
+        } = req.body;
+
+        console.log('Received subscription value:', subscribe); // Debug log
 
         if (!email) {
             return res.status(400).json({ error: 'Email is required' });
@@ -1276,10 +1291,14 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
                     certificateIpfsUrl: ipfsData?.ipfsUrl,
                     certificatePinataUrl: ipfsData?.pinataUrl,
                     ownershipCardUrl: localImageUrl,
-                    termsAccepted: true, // Add this line
-                    termsAcceptedAt: new Date().toISOString() // Add this line
+                    termsAccepted: termsAccepted || true,
+                    termsAcceptedAt: new Date().toISOString(),
+                    ageConfirmed: ageConfirmed || false,
+                    ageConfirmedAt: ageConfirmed ? new Date().toISOString() : null,
+                    // Add subscription data to this specific mint
+                    subscribeNewsletter: subscribe || false,
+                    subscribeNewsletterAt: subscribe ? new Date().toISOString() : null
                 };
-
 
                 const currentMints = existingData.mints || [];
                 currentMints.push(newMint);
@@ -1291,8 +1310,13 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
                     totalMinted: currentMints.length,
                     mints: currentMints,
                     lastMintedAt: mintedAt || new Date().toISOString(),
-                    updatedAt: new Date().toISOString()
+                    updatedAt: new Date().toISOString(),
+                    // Add subscription to user level (true if any mint has subscription or if current mint has subscription)
+                    subscribeNewsletter: subscribe || existingData.subscribeNewsletter || false,
+                    subscribeNewsletterAt: subscribe ? new Date().toISOString() : (existingData.subscribeNewsletterAt || null)
                 };
+
+                console.log('Updating user with subscription:', updateData.subscribeNewsletter); // Debug log
 
                 await userRef.update(updateData);
 
@@ -1304,7 +1328,8 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
                     certificateIpfsUrl: ipfsData?.ipfsUrl,
                     ownershipCardUrl: localImageUrl,
                     ipfsHash: ipfsData?.ipfsHash,
-                    totalMinted: currentMints.length
+                    totalMinted: currentMints.length,
+                    subscribeNewsletter: subscribe || false
                 });
             } else {
                 return res.status(200).json({
@@ -1328,8 +1353,13 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
             nftMinted: nftMinted || false,
             totalMinted: 0,
             mints: [],
-            termsAccepted: nftMinted || false, // Add this
-            termsAcceptedAt: nftMinted ? new Date().toISOString() : null // Add this
+            termsAccepted: termsAccepted || (nftMinted || false),
+            termsAcceptedAt: (termsAccepted || nftMinted) ? new Date().toISOString() : null,
+            ageConfirmed: ageConfirmed || false,
+            ageConfirmedAt: ageConfirmed ? new Date().toISOString() : null,
+            // Add subscription data for new user
+            subscribeNewsletter: subscribe || false,
+            subscribeNewsletterAt: subscribe ? new Date().toISOString() : null
         };
 
         if (walletAddress) userData.walletAddress = walletAddress;
@@ -1342,13 +1372,22 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
                 certificateIpfsHash: ipfsData?.ipfsHash,
                 certificateIpfsUrl: ipfsData?.ipfsUrl,
                 certificatePinataUrl: ipfsData?.pinataUrl,
-                ownershipCardUrl: localImageUrl
+                ownershipCardUrl: localImageUrl,
+                termsAccepted: termsAccepted || true,
+                termsAcceptedAt: new Date().toISOString(),
+                ageConfirmed: ageConfirmed || false,
+                ageConfirmedAt: ageConfirmed ? new Date().toISOString() : null,
+                // Add subscription data to the mint record
+                subscribeNewsletter: subscribe || false,
+                subscribeNewsletterAt: subscribe ? new Date().toISOString() : null
             };
 
             userData.mints = [newMint];
             userData.totalMinted = 1;
             userData.lastMintedAt = mintedAt || new Date().toISOString();
         }
+
+        console.log('Creating new user with subscription:', userData.subscribeNewsletter); // Debug log
 
         await userRef.set(userData);
 
@@ -1360,7 +1399,8 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
             certificateIpfsUrl: ipfsData?.ipfsUrl,
             ownershipCardUrl: localImageUrl,
             ipfsHash: ipfsData?.ipfsHash,
-            totalMinted: userData.totalMinted
+            totalMinted: userData.totalMinted,
+            subscribeNewsletter: subscribe || false
         });
 
     } catch (error) {
@@ -1708,7 +1748,7 @@ app.post('/api/certificates/batch', cors(corsOptions), async (req, res) => {
     }
 });
 
-// New endpoint to download archive (all certificates + signAndSong folder)
+// New endpoint to download archive (all certificates + Autograph and Song mp3 folder)
 // Replace the existing /api/users/:email/download-archive endpoint with this version
 app.get('/api/users/:email/download-archive', cors(corsOptions), async (req, res) => {
     try {
@@ -1773,7 +1813,7 @@ app.get('/api/users/:email/download-archive', cors(corsOptions), async (req, res
         // 3. Set up the zip archive
         res.set({
             'Content-Type': 'application/zip',
-            'Content-Disposition': `attachment; filename="muse_archive_${userData.name?.replace(/[^a-z0-9]/gi, '_') || 'user'}.zip"`,
+            'Content-Disposition': `attachment; filename="hope_archive_${userData.name?.replace(/[^a-z0-9]/gi, '_') || 'user'}.zip"`,
             'Cache-Control': 'no-cache'
         });
 
@@ -1878,15 +1918,15 @@ app.get('/api/users/:email/download-archive', cors(corsOptions), async (req, res
             }
         }
 
-        // 5. Add signAndSong folder if exists
-        const signAndSongPath = path.join(__dirname, 'signAndSong');
+        // 5. Add Autograph and Song mp3 folder if exists
+        const signAndSongPath = path.join(__dirname, 'Autograph and Song mp3');
         if (fs.existsSync(signAndSongPath)) {
-            console.log('Adding signAndSong folder');
-            archive.directory(signAndSongPath, 'signAndSong');
+            console.log('Adding Autograph and Song mp3 folder');
+            archive.directory(signAndSongPath, 'Autograph and Song mp3');
         } else {
-            console.warn('signAndSong folder not found');
+            console.warn('Autograph and Song mp3 folder not found');
             archive.append('Additional content folder not found. Please contact support if you believe this content should be available.', {
-                name: 'signAndSong/README.txt'
+                name: 'Autograph and Song mp3/README.txt'
             });
         }
 
@@ -1911,7 +1951,7 @@ Archive Details:
 
 Contents:
 1. /Certificates/ - Your ownership certificates for currently owned NFTs
-2. /signAndSong/ - Additional project content and assets
+2. /Autograph and Song mp3/ - Additional project content and assets
 
 Notes:
 - This archive only includes certificates for NFTs you currently own
