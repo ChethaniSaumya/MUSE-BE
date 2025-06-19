@@ -29,24 +29,24 @@ const contractABI = [
 	{
 		"inputs": [
 			{
-				"internalType": "address[]",
-				"name": "receivers",
-				"type": "address[]"
+				"internalType": "address",
+				"name": "receiver",
+				"type": "address"
 			},
 			{
-				"internalType": "uint256[]",
-				"name": "mintAmounts",
-				"type": "uint256[]"
+				"internalType": "string",
+				"name": "name",
+				"type": "string"
 			},
 			{
-				"internalType": "string[]",
-				"name": "names",
-				"type": "string[]"
+				"internalType": "string",
+				"name": "email",
+				"type": "string"
 			},
 			{
-				"internalType": "string[]",
-				"name": "emails",
-				"type": "string[]"
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
 			}
 		],
 		"name": "airdrop",
@@ -1401,7 +1401,7 @@ const contractABI = [
 	}
 ];
 
-const contractAddress = '0x0824F838569678Db290601C0A93A11DaD4618513'; // Replace with your contract address
+const contractAddress = '0x56DbAF337cE060F163632aEc5bA7d96253bE772B'; // Replace with your contract address
 
 // Create contract instance
 const nftContract = new web3.eth.Contract(contractABI, contractAddress);
@@ -2492,7 +2492,6 @@ async function getCurrentlyOwnedTokenIds(walletAddress) {
 		throw error;
 	}
 }
-
 
 async function isTokenOwnedByWallet(tokenId, walletAddress) {
 	try {
