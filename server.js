@@ -167,6 +167,34 @@ const contractABI = [
 	{
 		"inputs": [
 			{
+				"internalType": "address[]",
+				"name": "receivers",
+				"type": "address[]"
+			},
+			{
+				"internalType": "string[]",
+				"name": "names",
+				"type": "string[]"
+			},
+			{
+				"internalType": "string[]",
+				"name": "emails",
+				"type": "string[]"
+			},
+			{
+				"internalType": "uint256[]",
+				"name": "tokenIds",
+				"type": "uint256[]"
+			}
+		],
+		"name": "bulkAirdrop",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
 				"internalType": "uint256",
 				"name": "_mintAmount",
 				"type": "uint256"
@@ -1401,7 +1429,7 @@ const contractABI = [
 	}
 ];
 
-const contractAddress = '0x56DbAF337cE060F163632aEc5bA7d96253bE772B'; // Replace with your contract address
+const contractAddress = '0x15Cb6789c991BFc1afc9d2d0498Ba6D7C1B4d57B'; // Replace with your contract address
 
 // Create contract instance
 const nftContract = new web3.eth.Contract(contractABI, contractAddress);
