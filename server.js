@@ -2193,7 +2193,7 @@ app.post('/api/certificates/batch', cors(corsOptions), async (req, res) => {
 	}
 });
 
-// New endpoint to download archive (all certificates + Autograph and Song mp3 folder)
+// New endpoint to download archive (all certificates + Autograph and Coin folder)
 // Replace the existing /api/users/:email/download-archive endpoint with this version
 app.get('/api/users/:email/download-archive', cors(corsOptions), async (req, res) => {
 	try {
@@ -2363,15 +2363,15 @@ app.get('/api/users/:email/download-archive', cors(corsOptions), async (req, res
 			}
 		}
 
-		// 5. Add Autograph and Song mp3 folder if exists
-		const signAndSongPath = path.join(__dirname, 'Autograph and Song mp3');
+		// 5. Add Autograph and Coin folder if exists
+		const signAndSongPath = path.join(__dirname, 'Autograph and Coin');
 		if (fs.existsSync(signAndSongPath)) {
-			console.log('Adding Autograph and Song mp3 folder');
-			archive.directory(signAndSongPath, 'Autograph and Song mp3');
+			console.log('Adding Autograph and Coin folder');
+			archive.directory(signAndSongPath, 'Autograph and Coin');
 		} else {
-			console.warn('Autograph and Song mp3 folder not found');
+			console.warn('Autograph and Coin folder not found');
 			archive.append('Additional content folder not found. Please contact support if you believe this content should be available.', {
-				name: 'Autograph and Song mp3/README.txt'
+				name: 'Autograph and Coin/README.txt'
 			});
 		}
 
@@ -2396,7 +2396,7 @@ Archive Details:
 
 Contents:
 1. /Certificates/ - Your ownership certificates for currently owned NFTs
-2. /Autograph and Song mp3/ - Additional project content and assets
+2. /Autograph and Coin/ - Additional project content and assets
 
 Notes:
 - This archive only includes certificates for NFTs you currently own
@@ -2405,7 +2405,7 @@ Notes:
 
 Support: Contact the MUSE team for any issues with your archive
 `;
-		archive.append(readmeContent, { name: 'README.txt' });
+		//archive.append(readmeContent, { name: 'README.txt' });
 
 		console.log(`Added ${addedCount} certificates to archive for ${currentlyOwnedTokenIds.length} owned tokens`);
 
