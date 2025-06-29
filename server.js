@@ -1450,7 +1450,7 @@ app.use((req, res, next) => {
 app.use('/images', express.static(path.join(__dirname, 'generated_images')));
 
 var corsOptions = {
-	origin: ['https://muse-fe.vercel.app', 'http://localhost:3000', 'http://localhost:3001'],
+	origin: ['https://muse-fe.vercel.app', 'http://localhost:3000', 'http://localhost:3001', 'https://hopecoinkk.musecoinx.com'],
 	optionsSuccessStatus: 200,
 	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 	allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
