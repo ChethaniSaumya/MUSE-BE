@@ -10,7 +10,7 @@ const axios = require('axios');
 const archiver = require('archiver');
 const app = express();
 const Web3 = require('web3');
-const web3 = new Web3(new Web3.providers.HttpProvider('wss://go.getblock.io/2fd5e6cae4e4429790f2541a44ef1353'));
+const web3 = new Web3(new Web3.providers.HttpProvider('https://methodical-intensive-reel.matic.quiknode.pro/f053d766df9716bed741c91f5c0815633a15ab94/'));
 
 const contractABI = [
 	{
