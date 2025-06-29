@@ -10,7 +10,7 @@ const axios = require('axios');
 const archiver = require('archiver');
 const app = express();
 const Web3 = require('web3');
-const web3 = new Web3(new Web3.providers.HttpProvider('https://rpc.v4.testnet.pulsechain.com'));
+const web3 = new Web3(new Web3.providers.HttpProvider('wss://go.getblock.io/2fd5e6cae4e4429790f2541a44ef1353'));
 
 const contractABI = [
 	{
@@ -1429,7 +1429,7 @@ const contractABI = [
 	}
 ];
 
-const contractAddress = '0x15Cb6789c991BFc1afc9d2d0498Ba6D7C1B4d57B'; // Replace with your contract address
+const contractAddress = '0xcD9B1F056f80a6084B614C50dd345778633d13A4'; // Replace with your contract address
 
 // Create contract instance
 const nftContract = new web3.eth.Contract(contractABI, contractAddress);
