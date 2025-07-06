@@ -1854,31 +1854,46 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 	}
 });
 
+// In your backend (server.js), update the /api/users/wallet/:walletAddress endpoint:
 app.get('/api/users/wallet/:walletAddress', cors(corsOptions), async (req, res) => {
-	try {
-		const walletAddress = req.params.walletAddress;
-
-		// Query users collection to find user with this wallet address
-		const usersSnapshot = await db.collection('users')
-			.where('walletAddress', '==', walletAddress)
-			.limit(1)
-			.get();
-
-		if (usersSnapshot.empty) {
-			return res.status(404).json({ error: 'User not found' });
-		}
-
-		const userDoc = usersSnapshot.docs[0];
-		res.json({
-			id: userDoc.id,
-			...userDoc.data()
-		});
-	} catch (error) {
-		console.error('Error fetching user by wallet:', error);
-		res.status(500).json({ error: 'Internal server error' });
-	}
+  try {
+    const walletAddress = req.params.walletAddress;
+    console.log(`Searching for wallet: ${walletAddress}`);
+    
+    // Create a composite index on a lowercase version of walletAddress
+    // First, try to find by exact match
+    let usersSnapshot = await db.collection('users')
+      .where('walletAddress', '==', walletAddress)
+      .limit(1)
+      .get();
+    
+    if (usersSnapshot.empty) {
+      // Try with lowercase
+      usersSnapshot = await db.collection('users')
+        .where('walletAddress', '==', walletAddress.toLowerCase())
+        .limit(1)
+        .get();
+    }
+    
+    if (usersSnapshot.empty) {
+      console.log(`No user found for wallet: ${walletAddress}`);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const userDoc = usersSnapshot.docs[0];
+    res.json({
+      id: userDoc.id,
+      ...userDoc.data()
+    });
+    
+  } catch (error) {
+    console.error('Error fetching user by wallet:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: error.message 
+    });
+  }
 });
-
 
 // Get user data endpoint
 app.get('/api/users/:email', cors(corsOptions), async (req, res) => {
