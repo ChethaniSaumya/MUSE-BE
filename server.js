@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
@@ -11,6 +12,21 @@ const archiver = require('archiver');
 const app = express();
 const Web3 = require('web3');
 const web3 = new Web3(new Web3.providers.HttpProvider('https://methodical-intensive-reel.matic.quiknode.pro/f053d766df9716bed741c91f5c0815633a15ab94/'));
+const nodemailer = require('nodemailer');
+
+let emailTransporter;
+try {
+	emailTransporter = nodemailer.createTransport({  // Changed from createTransporter to createTransport
+		service: 'gmail', // or 'SendGrid', 'Mailgun', etc.
+		auth: {
+			user: process.env.EMAIL_USER, // Your email
+			pass: process.env.EMAIL_PASS  // Your email password or app password
+		}
+	});
+} catch (error) {
+	console.error('❌ Failed to create email transporter:', error);
+	process.exit(1);
+}
 
 const contractABI = [
 	{
@@ -1474,6 +1490,198 @@ const ensureDirectoryExists = (dirPath) => {
 ensureDirectoryExists(path.join(__dirname, 'generated_images'));
 ensureDirectoryExists(path.join(__dirname, 'assets'));
 
+
+const createMintSuccessEmail = (userName, tokenId, certificateUrl, isAirdrop = false) => {
+	const subject = isAirdrop ?
+		`🎁 Your Hope KK NFT has been airdropped!` :
+		`🎉 Your Hope KK NFT has been minted successfully!`;
+
+	const mintingText = isAirdrop ?
+		'has been airdropped to your wallet' :
+		'has been successfully minted';
+
+	return {
+		subject: subject,
+		html: `
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<style>
+				body {
+					font-family: 'Arial', sans-serif;
+					line-height: 1.6;
+					color: #333;
+					max-width: 600px;
+					margin: 0 auto;
+					padding: 20px;
+					background-color: #f4f4f4;
+				}
+				.email-container {
+					background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+					border-radius: 15px;
+					padding: 30px;
+					box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+				}
+				.header {
+					text-align: center;
+					color: white;
+					margin-bottom: 30px;
+				}
+				.header h1 {
+					margin: 0;
+					font-size: 28px;
+					text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+				}
+				.content {
+					background: white;
+					padding: 30px;
+					border-radius: 10px;
+					margin: 20px 0;
+					box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+				}
+				.nft-info {
+					background: #f8f9fa;
+					padding: 20px;
+					border-radius: 8px;
+					margin: 20px 0;
+					border-left: 4px solid #667eea;
+				}
+				.download-button {
+					display: inline-block;
+					background: linear-gradient(45deg, #667eea, #764ba2);
+					color: white;
+					padding: 15px 30px;
+					text-decoration: none;
+					border-radius: 25px;
+					font-weight: bold;
+					text-align: center;
+					margin: 20px 0;
+					box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+					transition: all 0.3s ease;
+				}
+				.download-button:hover {
+					transform: translateY(-2px);
+					box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+				}
+				.footer {
+					text-align: center;
+					color: #666;
+					font-size: 14px;
+					margin-top: 30px;
+					padding-top: 20px;
+					border-top: 1px solid #eee;
+				}
+				.tribute-section {
+					background: #fff3cd;
+					border: 1px solid #ffeaa7;
+					border-radius: 8px;
+					padding: 20px;
+					margin: 20px 0;
+					text-align: center;
+				}
+				.social-links {
+					text-align: center;
+					margin: 20px 0;
+				}
+				.social-links a {
+					display: inline-block;
+					margin: 0 10px;
+					color: #667eea;
+					text-decoration: none;
+				}
+				.important-note {
+					background: #d1ecf1;
+					border: 1px solid #bee5eb;
+					border-radius: 8px;
+					padding: 15px;
+					margin: 20px 0;
+				}
+			</style>
+		</head>
+		<body>
+			<div class="email-container">
+				<div class="header">
+					<h1>🎵 Hope KK NFT</h1>
+					<p>Tribute to the Legendary Singer</p>
+				</div>
+				
+				<div class="content">
+					<h2>Hello ${userName}! 👋</h2>
+					
+					<p>Congratulations! Your Hope KK commemorative NFT ${mintingText}. You are now part of an exclusive community honoring the musical legacy of the legendary singer KK.</p>
+					
+					<div class="nft-info">
+						<h3>📜 Your NFT Details:</h3>
+						<p><strong>Token ID:</strong> #${tokenId?.toString().padStart(5, '0') || 'TBD'}</p>
+						<p><strong>Collection:</strong> Hope KK Commemorative NFTs</p>
+						<p><strong>Status:</strong> Successfully ${isAirdrop ? 'Airdropped' : 'Minted'}</p>
+					</div>
+					
+					<div class="tribute-section">
+						<h3>🎤 About This Tribute</h3>
+						<p>This NFT celebrates KK's extraordinary musical journey and his timeless contribution to the world of music. Through "Humein Asha Hai," we honor not just his voice, but his vision of hope and resilience.</p>
+					</div>
+					
+					${certificateUrl ? `
+					<div style="text-align: center;">
+						<h3>🏆 Download Your Certificate</h3>
+						<p>Your personalized ownership certificate is ready!</p>
+						<a href="https://hopecoinkk.musecoinx.com/my-dashboard" class="download-button" style="color: white;">My Dashboard</a>
+					</div>
+					` : ''}
+					
+					<div class="important-note">
+						<h4>📱 What's Next?</h4>
+						<ul style="text-align: left;">
+							<li>Your NFT is now in your wallet</li>
+							<li>You can view it on OpenSea and other NFT marketplaces</li>
+							<li>Keep your certificate as proof of ownership</li>
+							<li>Join our community to stay updated on future releases</li>
+						</ul>
+					</div>
+					
+					<div class="social-links">
+						<p><strong>Connect with us:</strong></p>
+						<a href="https://www.musecoinx.com">🌐 Website</a>
+						<a href="mailto:contact@musecoinx.com">📧 Support</a>
+					</div>
+				</div>
+				
+				<div class="footer">
+					<p style="font-size: 15px; color: white;">Thank you for being part of this tribute to KK's legacy.</p>
+					<p style="font-size: 15px; color: white;">© ${new Date().getFullYear()} MuseCoinX. A PhyDigi Limited Company. All rights reserved</p>
+					<p style="font-size: 12px; color: #999;">
+						This is an automated email. Please do not reply to this address.
+					</p>
+				</div>
+			</div>
+		</body>
+		</html>
+		`
+	};
+};
+
+const sendMintSuccessEmail = async (userEmail, userName, tokenId, certificateUrl, isAirdrop = false) => {
+	try {
+		const emailContent = createMintSuccessEmail(userName, tokenId, certificateUrl, isAirdrop);
+
+		const mailOptions = {
+			from: `"MuseCoinX - Hope KK NFTs" <${process.env.EMAIL_USER}>`,
+			to: userEmail,
+			subject: emailContent.subject,
+			html: emailContent.html
+		};
+
+		const result = await emailTransporter.sendMail(mailOptions);
+		console.log('Email sent successfully:', result.messageId);
+		return { success: true, messageId: result.messageId };
+	} catch (error) {
+		console.error('Error sending email:', error);
+		return { success: false, error: error.message };
+	}
+};
+
+
 // Function to upload file to IPFS via Pinata
 const uploadToIPFS = async (filePath, fileName) => {
 	try {
@@ -1710,6 +1918,9 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 			}
 		}
 
+		// Variable to track email sending result
+		let emailSent = false;
+
 		if (doc.exists) {
 			const existingData = doc.data();
 
@@ -1753,6 +1964,30 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 
 				await userRef.update(updateData);
 
+				// Send email for existing user with new mint
+				if (name && email) {
+					try {
+						const emailResult = await sendMintSuccessEmail(
+							email,
+							name,
+							tokenId,
+							ipfsData?.ipfsUrl || localImageUrl,
+							isAirdrop
+						);
+
+						emailSent = emailResult.success;
+
+						if (emailResult.success) {
+							console.log(`✅ Mint success email sent to ${email}`);
+						} else {
+							console.error(`❌ Failed to send email to ${email}:`, emailResult.error);
+						}
+					} catch (emailError) {
+						console.error('Error in email sending process:', emailError);
+						emailSent = false;
+					}
+				}
+
 				return res.status(200).json({
 					success: true,
 					message: certificateExists ?
@@ -1766,14 +2001,16 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 					totalMinted: currentMints.length,
 					subscribeNewsletter: subscribe || false,
 					isAirdrop: isAirdrop || false,
-					certificateAlreadyExisted: certificateExists
+					certificateAlreadyExisted: certificateExists,
+					emailSent: emailSent
 				});
 			} else {
 				return res.status(200).json({
 					success: true,
 					message: 'User already exists',
 					userId: docId,
-					userData: existingData
+					userData: existingData,
+					emailSent: false
 				});
 			}
 		}
@@ -1828,6 +2065,30 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 			userData.lastMintedAt = mintedAt || new Date().toISOString();
 		}
 
+		// Send email for new user (only if NFT was minted)
+		if (nftMinted && transactionHash && name && email) {
+			try {
+				const emailResult = await sendMintSuccessEmail(
+					email,
+					name,
+					tokenId,
+					ipfsData?.ipfsUrl || localImageUrl,
+					isAirdrop
+				);
+
+				emailSent = emailResult.success;
+
+				if (emailResult.success) {
+					console.log(`✅ Mint success email sent to ${email}`);
+				} else {
+					console.error(`❌ Failed to send email to ${email}:`, emailResult.error);
+				}
+			} catch (emailError) {
+				console.error('Error in email sending process:', emailError);
+				emailSent = false;
+			}
+		}
+
 		console.log('Creating new user with airdrop data:', { isAirdrop, certificateExists });
 
 		await userRef.set(userData);
@@ -1845,7 +2106,8 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 			totalMinted: userData.totalMinted,
 			subscribeNewsletter: subscribe || false,
 			isAirdrop: isAirdrop || false,
-			certificateAlreadyExisted: certificateExists
+			certificateAlreadyExisted: certificateExists,
+			emailSent: emailSent
 		});
 
 	} catch (error) {
@@ -1856,43 +2118,43 @@ app.post('/api/users', cors(corsOptions), async (req, res) => {
 
 // In your backend (server.js), update the /api/users/wallet/:walletAddress endpoint:
 app.get('/api/users/wallet/:walletAddress', cors(corsOptions), async (req, res) => {
-  try {
-    const walletAddress = req.params.walletAddress;
-    console.log(`Searching for wallet: ${walletAddress}`);
-    
-    // Create a composite index on a lowercase version of walletAddress
-    // First, try to find by exact match
-    let usersSnapshot = await db.collection('users')
-      .where('walletAddress', '==', walletAddress)
-      .limit(1)
-      .get();
-    
-    if (usersSnapshot.empty) {
-      // Try with lowercase
-      usersSnapshot = await db.collection('users')
-        .where('walletAddress', '==', walletAddress.toLowerCase())
-        .limit(1)
-        .get();
-    }
-    
-    if (usersSnapshot.empty) {
-      console.log(`No user found for wallet: ${walletAddress}`);
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    const userDoc = usersSnapshot.docs[0];
-    res.json({
-      id: userDoc.id,
-      ...userDoc.data()
-    });
-    
-  } catch (error) {
-    console.error('Error fetching user by wallet:', error);
-    res.status(500).json({ 
-      error: 'Internal server error',
-      details: error.message 
-    });
-  }
+	try {
+		const walletAddress = req.params.walletAddress;
+		console.log(`Searching for wallet: ${walletAddress}`);
+
+		// Create a composite index on a lowercase version of walletAddress
+		// First, try to find by exact match
+		let usersSnapshot = await db.collection('users')
+			.where('walletAddress', '==', walletAddress)
+			.limit(1)
+			.get();
+
+		if (usersSnapshot.empty) {
+			// Try with lowercase
+			usersSnapshot = await db.collection('users')
+				.where('walletAddress', '==', walletAddress.toLowerCase())
+				.limit(1)
+				.get();
+		}
+
+		if (usersSnapshot.empty) {
+			console.log(`No user found for wallet: ${walletAddress}`);
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userDoc = usersSnapshot.docs[0];
+		res.json({
+			id: userDoc.id,
+			...userDoc.data()
+		});
+
+	} catch (error) {
+		console.error('Error fetching user by wallet:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
 });
 
 // Get user data endpoint
@@ -2552,6 +2814,58 @@ async function isTokenOwnedByWallet(tokenId, walletAddress) {
 		return false; // Assume not owned if we can't verify
 	}
 }
+
+app.post('/api/test-email', cors(corsOptions), async (req, res) => {
+	try {
+		const { email, name } = req.body;
+
+		if (!email) {
+			return res.status(400).json({ error: 'Email is required' });
+		}
+
+		// Use default name if not provided
+		const testName = name || 'Test User';
+		const testTokenId = 99999; // Test token ID
+		const testCertificateUrl = 'https://example.com/test-certificate.png'; // Test certificate URL
+
+		console.log(`Sending test email to: ${email}`);
+
+		// Send test email
+		const emailResult = await sendMintSuccessEmail(
+			email,
+			testName,
+			testTokenId,
+			testCertificateUrl,
+			false // isAirdrop = false for regular mint test
+		);
+
+		if (emailResult.success) {
+			console.log(`✅ Test email sent successfully to ${email}`);
+			res.json({
+				success: true,
+				message: 'Test email sent successfully',
+				email: email,
+				name: testName,
+				messageId: emailResult.messageId
+			});
+		} else {
+			console.error(`❌ Failed to send test email to ${email}:`, emailResult.error);
+			res.status(500).json({
+				success: false,
+				error: 'Failed to send test email',
+				details: emailResult.error
+			});
+		}
+
+	} catch (error) {
+		console.error('Error sending test email:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
 
 app.get('/api/certificates/:tokenId', cors(corsOptions), async (req, res) => {
 	try {
