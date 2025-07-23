@@ -16,13 +16,24 @@ const nodemailer = require('nodemailer');
 
 let emailTransporter;
 try {
-	emailTransporter = nodemailer.createTransport({  // Changed from createTransporter to createTransport
+	/*emailTransporter = nodemailer.createTransport({  // Changed from createTransporter to createTransport
 		service: 'gmail', // or 'SendGrid', 'Mailgun', etc.
 		auth: {
 			user: process.env.EMAIL_USER, // Your email
 			pass: process.env.EMAIL_PASS  // Your email password or app password
 		}
+	});*/
+
+	emailTransporter = nodemailer.createTransport({
+		host: 'smtpout.secureserver.net', // GoDaddy SMTP server
+		port: 465, // or 587 for TLS
+		secure: true, // true for 465, false for 587
+		auth: {
+			user: process.env.EMAIL_USER, // Your full GoDaddy email address
+			pass: process.env.EMAIL_PASS  // Your GoDaddy email password
+		}
 	});
+
 } catch (error) {
 	console.error('❌ Failed to create email transporter:', error);
 	process.exit(1);
