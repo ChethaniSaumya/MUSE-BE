@@ -15,6 +15,8 @@ const web3 = new Web3(new Web3.providers.HttpProvider('https://methodical-intens
 const nodemailer = require('nodemailer');
 const paypal = require('@paypal/checkout-server-sdk');
 const payoutsSDK = require('@paypal/payouts-sdk')
+const rateLimit = require('express-rate-limit');
+const admin = require('firebase-admin');
 
 const Environment = process.env.NODE_ENV === 'production'
 	? paypal.core.LiveEnvironment
@@ -27,6 +29,14 @@ const paypalClient = new paypal.core.PayPalHttpClient(
 	)
 );
 
+/*
+const adminLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000, // 15 minutes
+	max: 10, // Max 10 requests per 15 minutes
+	message: { error: 'Too many admin requests. Please try again later.' },
+	standardHeaders: true,
+	legacyHeaders: false
+});*/
 
 let emailTransporter;
 try {
@@ -1505,6 +1515,22 @@ var corsOptions = {
 const PINATA_JWT = process.env.PINATA_JWT; // Add your Pinata JWT token to environment variables
 const PINATA_API_URL = 'https://api.pinata.cloud/pinning/pinFileToIPFS';
 
+
+
+
+// Initialize Firebase Admin only if not already initialized
+if (!admin.apps.length) {
+	try {
+		admin.initializeApp({
+			credential: admin.credential.applicationDefault(),
+			databaseURL: process.env.FIREBASE_DATABASE_URL
+		});
+		console.log('Firebase Admin initialized successfully');
+	} catch (error) {
+		console.error('Firebase Admin initialization error:', error);
+	}
+}
+
 // Ensure directories exist
 const ensureDirectoryExists = (dirPath) => {
 	if (!fs.existsSync(dirPath)) {
@@ -1850,10 +1876,308 @@ const generateOwnershipCard = async (userName, tokenId, outputPath) => {
 	}
 };
 
-// Store user data endpoint with image generation and IPFS upload
-// Replace the entire /api/users POST endpoint in your server.js with this:
+const authenticateAdmin = async (req, res, next) => {
+	try {
+		// 1. Extract admin key from headers or query
+		const adminKey = req.headers['x-admin-key'] || req.query.adminKey;
+		const expectedKey = process.env.ADMIN_API_KEY;
 
-// Replace your existing /api/users POST endpoint with this updated version
+		// 2. Key validation
+		if (!adminKey || adminKey !== expectedKey) {
+			// Log unauthorized attempt (using your existing db reference)
+			await db.collection('security_log').add({
+				event: 'unauthorized_admin_attempt',
+				ip: req.ip,
+				userAgent: req.get('User-Agent'),
+				timestamp: admin.firestore.FieldValue.serverTimestamp(), // Now using properly initialized admin
+				endpoint: req.path,
+				attemptedKey: adminKey ? 'REDACTED' : 'MISSING' // Never log actual keys
+			});
+
+			return res.status(401).json({
+				error: 'Unauthorized: Invalid admin key',
+				code: 'ADMIN_AUTH_FAILED'
+			});
+		}
+
+		// 4. Log successful admin access (preserving your existing logging)
+		await db.collection('admin_access_log').add({
+			ip: req.ip,
+			endpoint: req.path,
+			method: req.method,
+			timestamp: admin.firestore.FieldValue.serverTimestamp(),
+			userAgent: req.get('User-Agent')
+		});
+
+		// 5. Add admin context to request for downstream middleware
+		req.adminContext = {
+			authenticatedAt: new Date().toISOString(),
+			accessMethod: adminKey === req.query.adminKey ? 'query' : 'header',
+			adminId: 'admin' // Add this line
+		};
+
+		next();
+
+	} catch (error) {
+		console.error('Admin authentication system error:', error);
+
+		// Secure error response - don't expose internal details
+		res.status(500).json({
+			error: 'Authentication system error',
+			code: 'AUTH_SYSTEM_FAILURE'
+		});
+
+		// Critical security error - should be alerted
+		await db.collection('security_errors').add({
+			error: 'Admin auth system failure',
+			stack: error.stack,
+			timestamp: admin.firestore.FieldValue.serverTimestamp(),
+			severity: 'CRITICAL'
+		});
+	}
+};
+
+//app.use('/api/admin/payout-limits', adminLimiter);
+//app.use('/api/admin/refresh-payout-status', adminLimiter);
+
+// ADD: Public endpoint to show remaining limits (without admin auth)
+app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				isActive: false,
+				remainingLimit: 0
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		// Only return public info - no sensitive data
+		res.json({
+			isActive: remainingLimit > 0,
+			remainingLimit: remainingLimit,
+			minimumPayout: 1.00
+		});
+	} catch (error) {
+		console.error('Error fetching public limits:', error);
+		res.status(500).json({ error: 'Failed to fetch limits' });
+	}
+});
+
+// POST: Set/Update payout limits
+app.post('/api/authenticateAdmin', cors(corsOptions), async (req, res) => {
+	try {
+		const { totalLimit, resetPeriod = 'monthly' } = req.body;
+
+		// Validation
+		if (!totalLimit || totalLimit <= 0) {
+			return res.status(400).json({ error: 'Total limit must be greater than 0' });
+		}
+
+		if (totalLimit > 100000) { // Reasonable max limit
+			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
+		}
+
+		const db = admin.firestore();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').set({
+			totalLimit: parseFloat(totalLimit),
+			usedAmount: 0, // Reset used amount when setting new limit
+			lastReset: now,
+			resetPeriod: resetPeriod,
+			updatedAt: now,
+			updatedBy: 'admin' // In production, use actual admin ID
+		});
+
+		// Log the change for audit trail
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_updated',
+			oldLimit: null, // You might want to fetch the old value first
+			newLimit: totalLimit,
+			timestamp: now,
+			adminId: 'admin' // In production, use actual admin ID
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limit updated successfully',
+			totalLimit: parseFloat(totalLimit),
+			remainingLimit: parseFloat(totalLimit)
+		});
+	} catch (error) {
+		console.error('Error setting payout limits:', error);
+		res.status(500).json({ error: 'Failed to set payout limits' });
+	}
+});
+
+// POST: Reset payout limits (manual reset)
+app.post('/api/authenticateAdmin_reset', cors(corsOptions), async (req, res) => {
+	try {
+		const db = admin.firestore();
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.status(404).json({ error: 'Payout limits not configured' });
+		}
+
+		const data = limitsDoc.data();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: 0,
+			lastReset: now,
+			updatedAt: now
+		});
+
+		// Log the reset
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_reset',
+			previousUsedAmount: data.usedAmount,
+			timestamp: now,
+			adminId: 'admin'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limits reset successfully',
+			remainingLimit: data.totalLimit
+		});
+	} catch (error) {
+		console.error('Error resetting payout limits:', error);
+		res.status(500).json({ error: 'Failed to reset payout limits' });
+	}
+});
+
+
+// Apply rate limiting to admin endpoints
+//app.use('/api/admin', adminLimiter);
+
+// Public endpoint to show remaining limits
+app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				isActive: false,
+				remainingLimit: 0
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		res.json({
+			isActive: remainingLimit > 0,
+			remainingLimit: remainingLimit,
+			minimumPayout: 1.00
+		});
+	} catch (error) {
+		console.error('Error fetching public limits:', error);
+		res.status(500).json({ error: 'Failed to fetch limits' });
+	}
+});
+
+// Admin endpoints with authentication
+app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const { totalLimit, resetPeriod = 'monthly' } = req.body;
+
+		// Validation
+		if (!totalLimit || totalLimit <= 0) {
+			return res.status(400).json({ error: 'Total limit must be greater than 0' });
+		}
+
+		if (totalLimit > 100000) {
+			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
+		}
+
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').set({
+			totalLimit: parseFloat(totalLimit),
+			usedAmount: 0,
+			lastReset: now,
+			resetPeriod: resetPeriod,
+			updatedAt: now,
+			updatedBy: req.adminContext?.adminId || 'admin' // Safe fallback
+		});
+
+		// Audit log
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_updated',
+			oldLimit: req.body.previousLimit || null,
+			newLimit: totalLimit,
+			timestamp: now,
+			adminId: req.adminContext?.adminId || 'admin', // Safe fallback
+			ip: req.ip || 'unknown'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limit updated successfully',
+			totalLimit: parseFloat(totalLimit),
+			remainingLimit: parseFloat(totalLimit)
+		});
+	} catch (error) {
+		console.error('Error setting payout limits:', error);
+		res.status(500).json({ error: 'Failed to set payout limits' });
+	}
+});
+
+// Reset payout limits
+app.post('/api/admin/payout-limits/reset', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.status(404).json({ error: 'Payout limits not configured' });
+		}
+
+		const data = limitsDoc.data();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: 0,
+			lastReset: now,
+			updatedAt: now
+		});
+
+		// Audit log
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_reset',
+			previousUsedAmount: data.usedAmount,
+			timestamp: now,
+			adminId: req.adminContext?.adminId || 'admin', // Add safe fallback
+			ip: req.ip || 'unknown'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limits reset successfully',
+			remainingLimit: data.totalLimit
+		});
+	} catch (error) {
+		console.error('Error resetting payout limits:', error);
+		res.status(500).json({ error: 'Failed to reset payout limits' });
+	}
+});
+
+
+
+
+
+
+
+
+
+
+
+
 app.post('/api/users', cors(corsOptions), async (req, res) => {
 	try {
 		const {
@@ -2176,6 +2500,185 @@ app.get('/api/users/wallet/:walletAddress', cors(corsOptions), async (req, res) 
 
 	} catch (error) {
 		console.error('Error fetching user by wallet:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Add this endpoint after your existing /api/admin/identity-documents endpoint
+
+// Enhanced admin endpoint for tax ID documents with pagination, search, and filtering
+app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
+	try {
+		const {
+			page = 1,
+			limit = 10,
+			status = 'all',
+			search = '',
+			sortBy = 'uploadedAt',
+			sortOrder = 'desc'
+		} = req.query;
+
+		console.log('🔍 Fetching tax ID documents with filters:', { page, limit, status, search, sortBy, sortOrder });
+
+		// Get all paypal documents with taxIdDocument
+		const allPaypalSnapshot = await db.collection('paypal').get();
+
+		let allDocuments = [];
+
+		allPaypalSnapshot.forEach(doc => {
+			const data = doc.data();
+
+			if (data.taxIdDocument && data.taxIdDocument.ipfsUrl) {
+				const document = {
+					id: doc.id,
+					walletAddress: data.walletAddress,
+					taxIdType: data.taxIdDocument.taxIdType,
+					ipfsUrl: data.taxIdDocument.ipfsUrl,
+					uploadedAt: data.taxIdDocument.uploadedAt,
+					rejectionReason: data.taxIdDocument.rejectionReason || null,
+					rejectedAt: data.taxIdDocument.rejectedAt || null,
+					verified: data.taxIdDocument.verified || false,
+					verifiedAt: data.taxIdDocument.verifiedAt || null
+				};
+
+				allDocuments.push(document);
+			}
+		});
+
+		// Apply status filter
+		let filteredDocuments = allDocuments;
+
+		switch (status) {
+			case 'pending':
+				filteredDocuments = allDocuments.filter(doc => !doc.verified && !doc.rejectionReason);
+				break;
+			case 'approved':
+				filteredDocuments = allDocuments.filter(doc => doc.verified);
+				break;
+			case 'rejected':
+				filteredDocuments = allDocuments.filter(doc => doc.rejectionReason && !doc.verified);
+				break;
+			default: // 'all'
+				filteredDocuments = allDocuments;
+		}
+
+		// Apply search filter
+		if (search) {
+			const searchLower = search.toLowerCase();
+			filteredDocuments = filteredDocuments.filter(doc =>
+				doc.walletAddress.toLowerCase().includes(searchLower) ||
+				doc.taxIdType.toLowerCase().includes(searchLower) ||
+				(doc.rejectionReason && doc.rejectionReason.toLowerCase().includes(searchLower))
+			);
+		}
+
+		// Apply sorting
+		filteredDocuments.sort((a, b) => {
+			let aVal = a[sortBy];
+			let bVal = b[sortBy];
+
+			// Handle date sorting
+			if (sortBy.includes('At')) {
+				aVal = new Date(aVal || 0);
+				bVal = new Date(bVal || 0);
+			}
+
+			if (sortOrder === 'desc') {
+				return bVal > aVal ? 1 : -1;
+			} else {
+				return aVal > bVal ? 1 : -1;
+			}
+		});
+
+		// Apply pagination
+		const totalDocuments = filteredDocuments.length;
+		const totalPages = Math.ceil(totalDocuments / parseInt(limit));
+		const startIndex = (parseInt(page) - 1) * parseInt(limit);
+		const endIndex = startIndex + parseInt(limit);
+
+		const paginatedDocuments = filteredDocuments.slice(startIndex, endIndex);
+
+		// Calculate statistics
+		const stats = {
+			total: allDocuments.length,
+			pending: allDocuments.filter(doc => !doc.verified && !doc.rejectionReason).length,
+			approved: allDocuments.filter(doc => doc.verified).length,
+			rejected: allDocuments.filter(doc => doc.rejectionReason && !doc.verified).length
+		};
+
+		console.log(`✅ Returning ${paginatedDocuments.length} of ${totalDocuments} tax ID documents (page ${page}/${totalPages})`);
+
+		res.json({
+			success: true,
+			documents: paginatedDocuments,
+			pagination: {
+				currentPage: parseInt(page),
+				totalPages,
+				totalDocuments,
+				hasNextPage: parseInt(page) < totalPages,
+				hasPrevPage: parseInt(page) > 1
+			},
+			stats,
+			filters: { status, search, sortBy, sortOrder }
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching tax ID documents:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Add the tax ID verification endpoint as well
+app.put('/api/admin/paypal/:walletAddress/verify-tax-id', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { verified, rejectionReason } = req.body;
+
+		console.log('🔧 Admin updating tax ID verification:', {
+			walletAddress,
+			verified,
+			rejectionReason
+		});
+
+		const docId = walletAddress.toLowerCase();
+		const paypalRef = db.collection('paypal').doc(docId);
+
+		const doc = await paypalRef.get();
+		if (!doc.exists) {
+			return res.status(404).json({ error: 'PayPal record not found' });
+		}
+
+		const updateData = {
+			'taxIdDocument.verified': verified,
+			'taxIdDocument.verifiedAt': new Date().toISOString(),
+			'taxIdDocument.verifiedBy': 'admin',
+			updatedAt: new Date().toISOString()
+		};
+
+		// Add rejection reason if document is rejected
+		if (!verified && rejectionReason) {
+			updateData['taxIdDocument.rejectionReason'] = rejectionReason;
+			updateData['taxIdDocument.rejectedAt'] = new Date().toISOString();
+		} else if (verified) {
+			// Clear rejection reason if approved
+			updateData['taxIdDocument.rejectionReason'] = null;
+			updateData['taxIdDocument.rejectedAt'] = null;
+		}
+
+		await paypalRef.update(updateData);
+
+		res.json({
+			success: true,
+			message: verified ? 'Tax ID document approved successfully' : 'Tax ID document rejected successfully',
+			verified: verified,
+			rejectionReason: rejectionReason || null
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating tax ID verification status:', error);
 		res.status(500).json({
 			error: 'Internal server error',
 			details: error.message
@@ -3101,12 +3604,23 @@ app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => 
 		allPaypalSnapshot.forEach(doc => {
 			const data = doc.data();
 
-			if (data.identityDocument && data.identityDocument.ipfsUrl) {
+			// Check if identity document exists with either old or new structure
+			if (data.identityDocument && (
+				data.identityDocument.ipfsUrl || // Old structure
+				(data.identityDocument.frontImage && data.identityDocument.frontImage.ipfsUrl) // New structure
+			)) {
+				// Handle both old and new document structures
+				const frontImageUrl = data.identityDocument.frontImage?.ipfsUrl || data.identityDocument.ipfsUrl;
+				const backImageUrl = data.identityDocument.backImage?.ipfsUrl || null;
+
 				const document = {
 					id: doc.id,
 					walletAddress: data.walletAddress,
 					documentType: data.identityDocument.documentType,
-					ipfsUrl: data.identityDocument.ipfsUrl,
+					ipfsUrl: frontImageUrl, // Use front image as primary URL
+					frontImageUrl: frontImageUrl,
+					backImageUrl: backImageUrl,
+					hasBackImage: !!backImageUrl,
 					uploadedAt: data.identityDocument.uploadedAt,
 					rejectionReason: data.identityDocument.rejectionReason || null,
 					rejectedAt: data.identityDocument.rejectedAt || null,
@@ -3292,79 +3806,151 @@ app.get('/api/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
 	}
 });
 
+// REPLACE: Your existing /api/paypal/:walletAddress/request-payout endpoint
 app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (req, res) => {
 	try {
 		const walletAddress = req.params.walletAddress;
 		const { amount } = req.body;
 
-		// Get PayPal data for this wallet
-		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+		console.log('🔧 Processing payout request with limits check:', {
+			walletAddress,
+			requestedAmount: amount
+		});
 
-		if (!paypalDoc.exists) {
-			return res.status(400).json({ error: 'PayPal email not set' });
-		}
-
-		const paypalData = paypalDoc.data();
-
-		if (!paypalData.paypalEmail) {
-			return res.status(400).json({ error: 'PayPal email not found' });
-		}
-
-		// ADD DEBUGGING LOGS
-		console.log('🔍 DEBUGGING PAYOUT REQUEST:');
-		console.log('Wallet Address:', walletAddress);
-		console.log('Recipient Email:', paypalData.paypalEmail);
-		console.log('Amount:', amount);
-		console.log('Environment:', process.env.NODE_ENV);
-
-		// Validate the email format
-		const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-		if (!emailRegex.test(paypalData.paypalEmail)) {
-			console.log('❌ Invalid email format:', paypalData.paypalEmail);
-			return res.status(400).json({ error: 'Invalid PayPal email format' });
-		}
-
-		// Check if it's a sandbox email for development
-		if (process.env.NODE_ENV !== 'production' && !paypalData.paypalEmail.includes('example.com')) {
-			console.log('⚠️ WARNING: Using non-sandbox email in development mode');
-			console.log('Expected format: sb-xxxxx@business.example.com or sb-xxxxx@personal.example.com');
-		}
-
-		// Validate amount
+		// INPUT VALIDATION
 		const payoutAmount = parseFloat(amount);
+		if (isNaN(payoutAmount) || payoutAmount <= 0) {
+			return res.status(400).json({ error: 'Invalid payout amount' });
+		}
+
+		if (payoutAmount > 20000) { // PayPal's individual limit
+			return res.status(400).json({ error: 'Maximum payout amount is $20,000' });
+		}
+
 		if (payoutAmount < 1.00) {
 			return res.status(400).json({ error: 'Minimum payout amount is $1.00' });
 		}
 
-		if (payoutAmount > 10000) {
-			return res.status(400).json({ error: 'Maximum payout amount is $10,000' });
+		// Check decimal places (max 2)
+		if (!/^\d+(\.\d{1,2})?$/.test(payoutAmount.toString())) {
+			return res.status(400).json({ error: 'Amount must have at most 2 decimal places' });
 		}
 
-		// Create unique payout ID
-		const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+		// ATOMIC TRANSACTION FOR SECURITY
+		const batch = db.batch();
 
-		// Prepare payout data to store
-		const newPayout = {
-			id: payoutId,
-			amount: payoutAmount,
-			status: 'processing',
-			requestedAt: new Date().toISOString(),
-			paypalEmail: paypalData.paypalEmail,
-			walletAddress: walletAddress
-		};
+		// 1. CHECK ADMIN PAYOUT LIMITS FIRST (CRITICAL)
+		const limitsRef = db.collection('admin_settings').doc('payout_limits');
+		const limitsDoc = await limitsRef.get();
 
-		console.log('🚀 Sending PayPal payout...');
-		console.log('Recipient:', paypalData.paypalEmail);
-		console.log('Amount:', payoutAmount);
-		console.log('Payout ID:', payoutId);
+		if (!limitsDoc.exists) {
+			console.log('❌ Payout limits not configured');
+			return res.status(400).json({
+				error: 'Payout system is not configured. Please contact support.'
+			});
+		}
 
-		// CREATE THE ACTUAL PAYPAL PAYOUT REQUEST
+		const limitsData = limitsDoc.data();
+		const remainingLimit = Math.max(0, limitsData.totalLimit - (limitsData.usedAmount || 0));
+
+		if (remainingLimit <= 0) {
+			console.log('❌ Payout limit reached');
+			return res.status(400).json({
+				error: 'Payout limit reached. Please try again later.'
+			});
+		}
+
+		if (payoutAmount > remainingLimit) {
+			console.log('❌ Admin wallet payout funds limit exceeded');
+			return res.status(400).json({
+				error: `Admin wallet payout funds limit exceeded`,
+				maxAvailable: remainingLimit
+			});
+		}
+
+		// 2. Get and validate PayPal data
+		const paypalRef = db.collection('paypal').doc(walletAddress.toLowerCase());
+		const paypalDoc = await paypalRef.get();
+
+		if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
+			return res.status(400).json({ error: 'PayPal email not configured' });
+		}
+
+		const paypalData = paypalDoc.data();
+
+		// 3. SECURITY VALIDATIONS
+		if (!paypalData.identityDocument || !paypalData.identityDocument.verified) {
+			return res.status(400).json({
+				error: 'Identity verification required before withdrawals'
+			});
+		}
+
+		if (!paypalData.taxIdDocument || !paypalData.taxIdDocument.verified) {
+			return res.status(400).json({
+				error: 'Tax ID verification required before withdrawals'
+			});
+		}
+
+		// 4. Check for pending payouts
+		const existingPayouts = paypalData.payouts || [];
+		const pendingPayouts = existingPayouts.filter(payout =>
+			payout.status === 'pending' ||
+			payout.status === 'processing' ||
+			payout.paypalStatus === 'PENDING'
+		);
+
+		if (pendingPayouts.length > 0) {
+			return res.status(400).json({
+				error: 'You have a pending payout. Please wait for it to complete.'
+			});
+		}
+
+		// 5. Daily withdrawal limit (security feature)
+		const today = new Date().toDateString();
+		const todayPayouts = existingPayouts.filter(payout => {
+			const payoutDate = new Date(payout.requestedAt).toDateString();
+			return payoutDate === today && payout.status !== 'failed';
+		});
+
+		if (todayPayouts.length > 0) {
+			return res.status(400).json({
+				error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
+			});
+		}
+
+		// 6. Verify user's available balance
+		const userSnapshot = await db.collection('users')
+			.where('walletAddress', '==', walletAddress)
+			.get();
+
+		if (userSnapshot.empty) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = userSnapshot.docs[0].data();
+		const totalEarned = (userData.totalMinted || 0) * 10; // $10 per NFT
+		const totalWithdrawn = existingPayouts
+			.filter(p => p.status === 'completed')
+			.reduce((sum, p) => sum + (p.amount || 0), 0);
+
+		const availableBalance = Math.max(0, totalEarned - totalWithdrawn);
+
+		if (payoutAmount > availableBalance) {
+			return res.status(400).json({
+				error: `Insufficient balance. Available: $${availableBalance.toFixed(2)}`
+			});
+		}
+
+		// 7. CREATE PAYPAL PAYOUT
+		console.log('Processing PayPal payout with security checks...');
+		const payoutId = `secure_payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
 		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
 		payoutRequest.requestBody({
 			sender_batch_header: {
 				sender_batch_id: payoutId,
-				email_subject: "Withdrawal from Hope KK NFTs",
-				email_message: "You have received a withdrawal from your Hope KK NFT royalties. Thank you for being part of our community!"
+				email_subject: "Secure Withdrawal from Hope KK NFTs",
+				email_message: "You have received a verified withdrawal from your Hope KK NFT royalties."
 			},
 			items: [{
 				recipient_type: "EMAIL",
@@ -3373,127 +3959,125 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 					currency: "USD"
 				},
 				receiver: paypalData.paypalEmail,
-				note: `Hope KK NFT Withdrawal - Amount: $${payoutAmount.toFixed(2)}`,
+				note: `Secure Hope KK NFT Withdrawal - Amount: $${payoutAmount.toFixed(2)} - Verified User`,
 				sender_item_id: payoutId
 			}]
 		});
 
-		// EXECUTE THE PAYPAL PAYOUT
-		console.log('📤 Executing PayPal API request...');
 		const response = await paypalClient.execute(payoutRequest);
 
-		console.log('✅ PayPal payout successful!');
-		console.log('Batch ID:', response.result.batch_header.payout_batch_id);
-		console.log('Status:', response.result.batch_header.batch_status);
-		console.log('Response:', JSON.stringify(response.result, null, 2));
+		// 8. ATOMIC UPDATE: Deduct from limits and record payout
+		const newUsedAmount = (limitsData.usedAmount || 0) + payoutAmount;
+		batch.update(limitsRef, {
+			usedAmount: newUsedAmount,
+			lastUpdated: new Date().toISOString()
+		});
 
-		// Update payout data with PayPal response
-		newPayout.status = response.result.batch_header.batch_status.toLowerCase(); // PENDING, SUCCESS, etc.
-		newPayout.paypalBatchId = response.result.batch_header.payout_batch_id;
-		newPayout.paypalStatus = response.result.batch_header.batch_status;
-		newPayout.processedAt = new Date().toISOString();
+		// 9. Record the payout
+		const payoutData = {
+			id: payoutId,
+			amount: payoutAmount,
+			status: response.result.batch_header.batch_status.toLowerCase(),
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			paypalStatus: response.result.batch_header.batch_status,
+			requestedAt: new Date().toISOString(),
+			processedAt: new Date().toISOString(),
+			paypalEmail: paypalData.paypalEmail,
+			walletAddress: walletAddress,
+			identityVerified: true,
+			taxIdVerified: true,
+			remainingLimitAfter: remainingLimit - payoutAmount
+		};
 
-		// If the batch status is SUCCESS, mark as completed
 		if (response.result.batch_header.batch_status === 'SUCCESS') {
-			newPayout.status = 'completed';
-			newPayout.completedAt = new Date().toISOString();
+			payoutData.status = 'completed';
+			payoutData.completedAt = new Date().toISOString();
 		}
 
-		// Store payout in database
-		const currentPayouts = paypalData.payouts || [];
-		currentPayouts.push(newPayout);
-
-		await db.collection('paypal').doc(walletAddress.toLowerCase()).update({
-			payouts: currentPayouts,
+		batch.update(paypalRef, {
+			payouts: [...existingPayouts, payoutData],
 			lastPayoutAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString()
 		});
 
-		console.log('💾 Payout saved to database');
+		// 10. Audit log
+		batch.set(db.collection('payout_audit_log').doc(), {
+			walletAddress: walletAddress,
+			amount: payoutAmount,
+			paypalEmail: paypalData.paypalEmail,
+			batchId: response.result.batch_header.payout_batch_id,
+			timestamp: new Date(),
+			status: 'initiated',
+			remainingLimit: remainingLimit - payoutAmount,
+			userBalance: availableBalance,
+			ip: req.ip || 'unknown'
+		});
 
-		// Return success response
+		// Commit atomic transaction
+		await batch.commit();
+
+		console.log('✅ Secure payout processed successfully');
 		res.json({
 			success: true,
-			message: 'Withdrawal request submitted successfully!',
+			message: 'Secure withdrawal processed successfully!',
 			payoutId: payoutId,
 			amount: payoutAmount,
 			paypalBatchId: response.result.batch_header.payout_batch_id,
-			batchStatus: response.result.batch_header.batch_status,
-			recipient: paypalData.paypalEmail,
-			// Include some debugging info for development
-			debug: process.env.NODE_ENV !== 'production' ? {
-				environment: 'sandbox',
-				payoutRequest: payoutRequest.requestBody,
-				responseHeaders: response.result.batch_header
-			} : undefined
+			remainingLimit: remainingLimit - payoutAmount,
+			estimatedArrival: '1-3 business days'
 		});
 
 	} catch (error) {
-		console.error('❌ PayPal payout failed:', error);
+		console.error('❌ Secure payout failed:', error);
 
-		// Handle different types of PayPal API errors
-		let errorMessage = 'Withdrawal failed. Please try again.';
-		let errorDetails = error.message;
-
-		if (error.response && error.response.data) {
-			const errorData = error.response.data;
-			console.log('PayPal API Error Response:', JSON.stringify(errorData, null, 2));
-
-			if (errorData.details && errorData.details.length > 0) {
-				errorMessage = errorData.details[0].description || errorMessage;
-				console.log('PayPal Error Details:', errorData.details);
-			}
-
-			if (errorData.name) {
-				errorDetails = `${errorData.name}: ${errorData.message}`;
-			}
-		}
-
-		// Store failed payout in database
+		// Store failed payout for audit
 		try {
-			const walletAddress = req.params.walletAddress;
-			const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
-
-			if (paypalDoc.exists) {
-				const paypalData = paypalDoc.data();
-				const failedPayout = {
-					id: `failed_${Date.now()}`,
-					amount: parseFloat(req.body.amount),
-					status: 'failed',
-					requestedAt: new Date().toISOString(),
-					errorMessage: errorMessage,
-					errorDetails: errorDetails,
-					paypalEmail: paypalData.paypalEmail,
-					walletAddress: walletAddress
-				};
-
-				const currentPayouts = paypalData.payouts || [];
-				currentPayouts.push(failedPayout);
-
-				await db.collection('paypal').doc(walletAddress.toLowerCase()).update({
-					payouts: currentPayouts,
-					lastFailedPayoutAt: new Date().toISOString(),
-					updatedAt: new Date().toISOString()
-				});
-
-				console.log('💾 Failed payout saved to database');
-			}
-		} catch (dbError) {
-			console.error('Error storing failed payout:', dbError);
+			await db.collection('payout_audit_log').add({
+				walletAddress: req.params.walletAddress,
+				amount: parseFloat(req.body.amount),
+				status: 'failed',
+				error: error.message,
+				timestamp: new Date(),
+				ip: req.ip || 'unknown'
+			});
+		} catch (auditError) {
+			console.error('Error logging failed payout:', auditError);
 		}
 
-		// Return error response
 		res.status(500).json({
 			success: false,
-			error: errorMessage,
-			details: errorDetails,
-			// Include debugging info for development
-			debug: process.env.NODE_ENV !== 'production' ? {
-				originalError: error.message,
-				environment: 'sandbox',
-				timestamp: new Date().toISOString()
-			} : undefined
+			error: 'Withdrawal failed. Please try again.',
+			details: error.message
 		});
+	}
+});
+
+// Get current payout limits
+app.get('/api/admin/payout-limits', cors(corsOptions), async (req, res) => {
+	try {
+		const { adminKey } = req.query;
+
+		if (adminKey !== process.env.ADMIN_KEY) {
+			return res.status(401).json({ error: 'Unauthorized' });
+		}
+
+		const limitsDoc = await db.collection('admin').doc('payoutLimits').get();
+		if (!limitsDoc.exists) {
+			return res.json({
+				totalLimit: 0,
+				remainingLimit: 0,
+				isSet: false
+			});
+		}
+
+		res.json({
+			...limitsDoc.data(),
+			isSet: true
+		});
+
+	} catch (error) {
+		console.error('Error getting payout limits:', error);
+		res.status(500).json({ error: 'Internal server error' });
 	}
 });
 
@@ -3501,122 +4085,122 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 // Replace your existing /api/admin/refresh-payout-status/:walletAddress endpoint with this fixed version:
 
 app.post('/api/admin/refresh-payout-status/:walletAddress', cors(corsOptions), async (req, res) => {
-  try {
-    const walletAddress = req.params.walletAddress;
-    
-    // Get PayPal data for this wallet
-    const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
-    if (!paypalDoc.exists) {
-      return res.status(404).json({ error: 'PayPal data not found' });
-    }
+	try {
+		const walletAddress = req.params.walletAddress;
 
-    const paypalData = paypalDoc.data();
-    const payouts = paypalData.payouts || [];
-    
-    // Find pending payouts with PayPal batch IDs
-    const pendingPayouts = payouts.filter(payout => 
-      (payout.status === 'pending' || payout.status === 'processing') && 
-      payout.paypalBatchId
-    );
+		// Get PayPal data for this wallet
+		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+		if (!paypalDoc.exists) {
+			return res.status(404).json({ error: 'PayPal data not found' });
+		}
 
-    if (pendingPayouts.length === 0) {
-      return res.json({ 
-        success: true,
-        message: 'No pending payouts to check',
-        checkedPayouts: 0,
-        updatedPayouts: 0
-      });
-    }
+		const paypalData = paypalDoc.data();
+		const payouts = paypalData.payouts || [];
 
-    let updatedCount = 0;
-    
-    // Check each pending payout with PayPal
-    for (const payout of pendingPayouts) {
-      try {
-        console.log(`Checking PayPal status for batch: ${payout.paypalBatchId}`);
-        
-        const request = new payoutsSDK.payouts.PayoutsGetRequest(payout.paypalBatchId);
-        const response = await paypalClient.execute(request);
-        
-        const batchStatus = response.result.batch_header.batch_status;
-        const payoutItem = response.result.items[0]; // First item
-        
-        console.log(`Batch ${payout.paypalBatchId} status: ${batchStatus}`);
-        
-        // Update the payout object - ONLY set defined values
-        payout.paypalStatus = batchStatus;
-        payout.lastChecked = new Date().toISOString();
-        
-        if (payoutItem) {
-          // Only set values that exist
-          if (payoutItem.transaction_status) {
-            payout.itemStatus = payoutItem.transaction_status;
-          }
-          
-          if (payoutItem.transaction_id) {
-            payout.paypalTransactionId = payoutItem.transaction_id;
-          }
-          
-          // Update our local status based on PayPal status
-          if (payoutItem.transaction_status === 'SUCCESS') {
-            payout.status = 'completed';
-            payout.completedAt = new Date().toISOString();
-            updatedCount++;
-          } else if (
-            payoutItem.transaction_status === 'FAILED' || 
-            payoutItem.transaction_status === 'RETURNED' ||
-            batchStatus === 'DENIED'
-          ) {
-            payout.status = 'failed';
-            
-            // Handle error messages safely
-            if (payoutItem.errors && payoutItem.errors.length > 0) {
-              payout.failureReason = payoutItem.errors[0].message;
-            } else if (batchStatus === 'DENIED') {
-              payout.failureReason = 'Payout batch was denied by PayPal';
-            } else {
-              payout.failureReason = 'Transaction failed';
-            }
-            
-            updatedCount++;
-          }
-        } else {
-          // Handle case where there are no items in the response
-          if (batchStatus === 'DENIED') {
-            payout.status = 'failed';
-            payout.failureReason = 'Payout batch was denied by PayPal';
-            updatedCount++;
-          }
-        }
-        
-      } catch (error) {
-        console.error(`Error checking payout ${payout.id}:`, error);
-        payout.lastCheckError = error.message;
-        payout.lastChecked = new Date().toISOString();
-      }
-    }
-    
-    // Save updated payouts back to database
-    await db.collection('paypal').doc(walletAddress.toLowerCase()).update({
-      payouts: payouts,
-      lastStatusCheck: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-    
-    res.json({
-      success: true,
-      message: `Checked ${pendingPayouts.length} pending payouts, updated ${updatedCount}`,
-      checkedPayouts: pendingPayouts.length,
-      updatedPayouts: updatedCount
-    });
-    
-  } catch (error) {
-    console.error('Error refreshing payout status:', error);
-    res.status(500).json({ 
-      error: 'Failed to refresh payout status',
-      details: error.message 
-    });
-  }
+		// Find pending payouts with PayPal batch IDs
+		const pendingPayouts = payouts.filter(payout =>
+			(payout.status === 'pending' || payout.status === 'processing') &&
+			payout.paypalBatchId
+		);
+
+		if (pendingPayouts.length === 0) {
+			return res.json({
+				success: true,
+				message: 'No pending payouts to check',
+				checkedPayouts: 0,
+				updatedPayouts: 0
+			});
+		}
+
+		let updatedCount = 0;
+
+		// Check each pending payout with PayPal
+		for (const payout of pendingPayouts) {
+			try {
+				console.log(`Checking PayPal status for batch: ${payout.paypalBatchId}`);
+
+				const request = new payoutsSDK.payouts.PayoutsGetRequest(payout.paypalBatchId);
+				const response = await paypalClient.execute(request);
+
+				const batchStatus = response.result.batch_header.batch_status;
+				const payoutItem = response.result.items[0]; // First item
+
+				console.log(`Batch ${payout.paypalBatchId} status: ${batchStatus}`);
+
+				// Update the payout object - ONLY set defined values
+				payout.paypalStatus = batchStatus;
+				payout.lastChecked = new Date().toISOString();
+
+				if (payoutItem) {
+					// Only set values that exist
+					if (payoutItem.transaction_status) {
+						payout.itemStatus = payoutItem.transaction_status;
+					}
+
+					if (payoutItem.transaction_id) {
+						payout.paypalTransactionId = payoutItem.transaction_id;
+					}
+
+					// Update our local status based on PayPal status
+					if (payoutItem.transaction_status === 'SUCCESS') {
+						payout.status = 'completed';
+						payout.completedAt = new Date().toISOString();
+						updatedCount++;
+					} else if (
+						payoutItem.transaction_status === 'FAILED' ||
+						payoutItem.transaction_status === 'RETURNED' ||
+						batchStatus === 'DENIED'
+					) {
+						payout.status = 'failed';
+
+						// Handle error messages safely
+						if (payoutItem.errors && payoutItem.errors.length > 0) {
+							payout.failureReason = payoutItem.errors[0].message;
+						} else if (batchStatus === 'DENIED') {
+							payout.failureReason = 'Payout batch was denied by PayPal';
+						} else {
+							payout.failureReason = 'Transaction failed';
+						}
+
+						updatedCount++;
+					}
+				} else {
+					// Handle case where there are no items in the response
+					if (batchStatus === 'DENIED') {
+						payout.status = 'failed';
+						payout.failureReason = 'Payout batch was denied by PayPal';
+						updatedCount++;
+					}
+				}
+
+			} catch (error) {
+				console.error(`Error checking payout ${payout.id}:`, error);
+				payout.lastCheckError = error.message;
+				payout.lastChecked = new Date().toISOString();
+			}
+		}
+
+		// Save updated payouts back to database
+		await db.collection('paypal').doc(walletAddress.toLowerCase()).update({
+			payouts: payouts,
+			lastStatusCheck: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		});
+
+		res.json({
+			success: true,
+			message: `Checked ${pendingPayouts.length} pending payouts, updated ${updatedCount}`,
+			checkedPayouts: pendingPayouts.length,
+			updatedPayouts: updatedCount
+		});
+
+	} catch (error) {
+		console.error('Error refreshing payout status:', error);
+		res.status(500).json({
+			error: 'Failed to refresh payout status',
+			details: error.message
+		});
+	}
 });
 
 // Process payout request
@@ -3819,13 +4403,13 @@ setInterval(checkPendingPayouts, 60 * 60 * 1000); // Every hour
 app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async (req, res) => {
 	try {
 		const walletAddress = req.params.walletAddress;
-		const { documentType, documentImage } = req.body;
+		const { documentType, frontImage, backImage } = req.body;
 
 		console.log('🔧 Identity document upload for wallet:', walletAddress);
 		console.log('Document type:', documentType);
 
-		if (!documentType || !documentImage) {
-			return res.status(400).json({ error: 'Document type and image are required' });
+		if (!documentType || !frontImage) {
+			return res.status(400).json({ error: 'Document type and front image are required' });
 		}
 
 		// Validate document type
@@ -3834,18 +4418,31 @@ app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async 
 			return res.status(400).json({ error: 'Invalid document type' });
 		}
 
-		// Convert base64 to buffer
-		const base64Data = documentImage.replace(/^data:image\/[a-z]+;base64,/, '');
-		const imageBuffer = Buffer.from(base64Data, 'base64');
+		// Upload front image
+		const frontBase64Data = frontImage.replace(/^data:image\/[a-z]+;base64,/, '');
+		const frontImageBuffer = Buffer.from(frontBase64Data, 'base64');
 
-		// Upload directly to IPFS using buffer instead of file
-		let ipfsData = null;
+		let frontIpfsData = null;
 		try {
-			ipfsData = await uploadToIPFSFromBuffer(imageBuffer, `identity_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
-			console.log('Identity document uploaded to IPFS:', ipfsData.ipfsUrl);
+			frontIpfsData = await uploadToIPFSFromBuffer(frontImageBuffer, `identity_front_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
+			console.log('Front document uploaded to IPFS:', frontIpfsData.ipfsUrl);
 		} catch (ipfsError) {
-			console.error('IPFS upload failed:', ipfsError);
-			return res.status(500).json({ error: 'Failed to upload document to IPFS' });
+			console.error('Front image IPFS upload failed:', ipfsError);
+			return res.status(500).json({ error: 'Failed to upload front document to IPFS' });
+		}
+
+		// Upload back image if provided
+		let backIpfsData = null;
+		if (backImage) {
+			try {
+				const backBase64Data = backImage.replace(/^data:image\/[a-z]+;base64,/, '');
+				const backImageBuffer = Buffer.from(backBase64Data, 'base64');
+				backIpfsData = await uploadToIPFSFromBuffer(backImageBuffer, `identity_back_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
+				console.log('Back document uploaded to IPFS:', backIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('Back image IPFS upload failed:', ipfsError);
+				// Continue without back image if upload fails
+			}
 		}
 
 		// Update PayPal collection with identity document
@@ -3856,8 +4453,16 @@ app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async 
 		const updateData = {
 			identityDocument: {
 				documentType: documentType,
-				ipfsUrl: ipfsData.ipfsUrl,
-				ipfsHash: ipfsData.ipfsHash,
+				frontImage: {
+					ipfsUrl: frontIpfsData.ipfsUrl,
+					ipfsHash: frontIpfsData.ipfsHash
+				},
+				...(backIpfsData && {
+					backImage: {
+						ipfsUrl: backIpfsData.ipfsUrl,
+						ipfsHash: backIpfsData.ipfsHash
+					}
+				}),
 				uploadedAt: new Date().toISOString(),
 				verified: false
 			},
@@ -3879,7 +4484,8 @@ app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async 
 			success: true,
 			message: 'Identity document uploaded successfully',
 			documentType: documentType,
-			ipfsUrl: ipfsData.ipfsUrl
+			frontImageUrl: frontIpfsData.ipfsUrl,
+			backImageUrl: backIpfsData?.ipfsUrl || null
 		});
 
 	} catch (error) {
@@ -3891,6 +4497,125 @@ app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async 
 	}
 });
 
+// Tax ID document upload endpoint
+app.post('/api/paypal/:walletAddress/upload-tax-id', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { taxIdType, documentImage } = req.body;
+
+		console.log('🔧 Tax ID document upload for wallet:', walletAddress);
+		console.log('Tax ID type:', taxIdType);
+
+		if (!taxIdType || !documentImage) {
+			return res.status(400).json({ error: 'Tax ID type and document image are required' });
+		}
+
+		// Validate tax ID type
+		const validTaxIdTypes = ['ssn_card', 'tax_return', 'ein_letter', 'itin_letter', 'other'];
+		if (!validTaxIdTypes.includes(taxIdType)) {
+			return res.status(400).json({ error: 'Invalid tax ID document type' });
+		}
+
+		// Convert base64 to buffer
+		const base64Data = documentImage.replace(/^data:image\/[a-z]+;base64,/, '');
+		const imageBuffer = Buffer.from(base64Data, 'base64');
+
+		// Upload to IPFS
+		let ipfsData = null;
+		try {
+			ipfsData = await uploadToIPFSFromBuffer(imageBuffer, `tax_id_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
+			console.log('Tax ID document uploaded to IPFS:', ipfsData.ipfsUrl);
+		} catch (ipfsError) {
+			console.error('Tax ID IPFS upload failed:', ipfsError);
+			return res.status(500).json({ error: 'Failed to upload tax ID document to IPFS' });
+		}
+
+		// Update PayPal collection with tax ID document
+		const docId = walletAddress.toLowerCase();
+		const paypalRef = db.collection('paypal').doc(docId);
+
+		const doc = await paypalRef.get();
+		const updateData = {
+			taxIdDocument: {
+				taxIdType: taxIdType,
+				ipfsUrl: ipfsData.ipfsUrl,
+				ipfsHash: ipfsData.ipfsHash,
+				uploadedAt: new Date().toISOString(),
+				verified: false
+			},
+			updatedAt: new Date().toISOString()
+		};
+
+		if (doc.exists) {
+			await paypalRef.update(updateData);
+		} else {
+			await paypalRef.set({
+				walletAddress: walletAddress.toLowerCase(),
+				...updateData,
+				createdAt: new Date().toISOString(),
+				payouts: []
+			});
+		}
+
+		res.json({
+			success: true,
+			message: 'Tax ID document uploaded successfully',
+			taxIdType: taxIdType,
+			documentUrl: ipfsData.ipfsUrl
+		});
+
+	} catch (error) {
+		console.error('❌ Error uploading tax ID document:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Get tax ID document status
+app.get('/api/paypal/:walletAddress/tax-id-status', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+
+		if (!paypalDoc.exists) {
+			return res.json({
+				hasDocument: false,
+				taxIdType: null,
+				verified: false,
+				canUpload: true
+			});
+		}
+
+		const data = paypalDoc.data();
+		const taxIdDoc = data.taxIdDocument;
+
+		if (!taxIdDoc) {
+			return res.json({
+				hasDocument: false,
+				taxIdType: null,
+				verified: false,
+				canUpload: true
+			});
+		}
+
+		res.json({
+			hasDocument: true,
+			taxIdType: taxIdDoc.taxIdType,
+			verified: taxIdDoc.verified || false,
+			uploadedAt: taxIdDoc.uploadedAt,
+			rejectionReason: taxIdDoc.rejectionReason || null,
+			rejectedAt: taxIdDoc.rejectedAt || null,
+			verifiedAt: taxIdDoc.verifiedAt || null,
+			canUpload: !taxIdDoc.verified
+		});
+
+	} catch (error) {
+		console.error('❌ Error checking tax ID status:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
 // Add this function after your existing uploadToIPFS function
 
 const uploadToIPFSFromBuffer = async (buffer, fileName) => {
@@ -3994,7 +4719,10 @@ app.get('/api/paypal/:walletAddress/identity-status', cors(corsOptions), async (
 			rejectionReason: identityDoc.rejectionReason || null,
 			rejectedAt: identityDoc.rejectedAt || null,
 			verifiedAt: identityDoc.verifiedAt || null,
-			canUpload: !identityDoc.verified // Can only upload if not verified
+			canUpload: !identityDoc.verified,
+			frontImageUrl: identityDoc.frontImage?.ipfsUrl || identityDoc.ipfsUrl, // Backward compatibility
+			backImageUrl: identityDoc.backImage?.ipfsUrl || null,
+			hasBothSides: !!(identityDoc.frontImage && identityDoc.backImage)
 		});
 
 	} catch (error) {
@@ -4376,6 +5104,156 @@ app.post('/api/test-paypal-payout', cors(corsOptions), async (req, res) => {
 			error: errorMessage,
 			details: error.message
 		});
+	}
+});
+
+// ADD: Get current payout limits with admin authentication
+app.get('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				isSet: false,
+				totalLimit: 0,
+				remainingLimit: 0,
+				usedAmount: 0,
+				lastReset: null
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		res.json({
+			isSet: true,
+			totalLimit: data.totalLimit || 0,
+			remainingLimit: remainingLimit,
+			usedAmount: data.usedAmount || 0,
+			lastReset: data.lastReset,
+			lastUpdated: data.lastUpdated
+		});
+	} catch (error) {
+		console.error('Error fetching payout limits:', error);
+		res.status(500).json({ error: 'Failed to fetch payout limits' });
+	}
+});
+
+// ADD: Set/Update payout limits
+app.post('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
+	try {
+		const { totalLimit } = req.body;
+
+		// Validation
+		if (!totalLimit || totalLimit <= 0) {
+			return res.status(400).json({ error: 'Total limit must be greater than 0' });
+		}
+
+		if (totalLimit > 100000) { // Reasonable max limit
+			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
+		}
+
+		const now = new Date();
+
+		// Get current data for audit log
+		const currentDoc = await db.collection('admin_settings').doc('payout_limits').get();
+		const oldLimit = currentDoc.exists ? currentDoc.data().totalLimit : null;
+
+		await db.collection('admin_settings').doc('payout_limits').set({
+			totalLimit: parseFloat(totalLimit),
+			usedAmount: 0, // Reset used amount when setting new limit
+			lastReset: now,
+			updatedAt: now,
+			updatedBy: 'admin'
+		});
+
+		// Log the change for audit trail
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_updated',
+			oldLimit: oldLimit,
+			newLimit: parseFloat(totalLimit),
+			timestamp: now,
+			adminId: 'admin',
+			ip: req.ip
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limit updated successfully',
+			totalLimit: parseFloat(totalLimit),
+			remainingLimit: parseFloat(totalLimit)
+		});
+	} catch (error) {
+		console.error('Error setting payout limits:', error);
+		res.status(500).json({ error: 'Failed to set payout limits' });
+	}
+});
+
+// ADD: Reset payout limits (manual reset)
+app.post('/api/admin/payout-limits/reset', authenticateAdmin, async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.status(404).json({ error: 'Payout limits not configured' });
+		}
+
+		const data = limitsDoc.data();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: 0,
+			lastReset: now,
+			updatedAt: now
+		});
+
+		// Log the reset
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_reset',
+			previousUsedAmount: data.usedAmount,
+			timestamp: now,
+			adminId: 'admin',
+			ip: req.ip
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limits reset successfully',
+			remainingLimit: data.totalLimit
+		});
+	} catch (error) {
+		console.error('Error resetting payout limits:', error);
+		res.status(500).json({ error: 'Failed to reset payout limits' });
+	}
+});
+
+// Admin endpoint to set payout limit
+app.post('/api/admin/set-payout-limit', cors(corsOptions), async (req, res) => {
+	try {
+		const { limitAmount, adminKey } = req.body;
+
+		// Simple admin authentication
+		if (adminKey !== process.env.ADMIN_KEY) {
+			return res.status(401).json({ error: 'Unauthorized' });
+		}
+
+		await db.collection('admin').doc('payoutLimits').set({
+			totalLimit: parseFloat(limitAmount),
+			remainingLimit: parseFloat(limitAmount), // Initialize remaining with full amount
+			updatedAt: new Date().toISOString(),
+			updatedBy: 'admin'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limit set successfully',
+			totalLimit: parseFloat(limitAmount),
+			remainingLimit: parseFloat(limitAmount)
+		});
+
+	} catch (error) {
+		console.error('Error setting payout limit:', error);
+		res.status(500).json({ error: 'Internal server error' });
 	}
 });
 
