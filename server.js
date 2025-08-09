@@ -3380,56 +3380,119 @@ app.get('/api/certificates/:tokenId', cors(corsOptions), async (req, res) => {
 
 const calculateUserPayout = async (userData) => {
 	try {
-		const totalNFTsOwned = userData.totalMinted || 0;
+		console.log('🔍 Starting payout calculation for user:', userData?.email || 'unknown');
 
-		// Get total supply from contract (you'll need to implement this in backend)
-		// For now, we'll use the totalSupply that's already being fetched in frontend
-		// The backend calculation should match the frontend
+		const userNFTsOwned = userData.totalMinted || 0;
+		console.log('📊 User NFTs owned:', userNFTsOwned);
+
+		// Get total supply from contract
 		let totalSupply = 0;
-
 		try {
-			// Get total supply from your contract
-			totalSupply = await nftContract.methods.totalSupply().call();
-			totalSupply = Number(totalSupply);
+			const contractTotalSupply = await nftContract.methods.totalSupply().call();
+			totalSupply = Number(contractTotalSupply);
+			console.log('📊 Contract Total Supply:', totalSupply);
+
+			if (totalSupply <= 0) {
+				console.warn('⚠️ Total supply is 0, using fallback of 1');
+				totalSupply = 1;
+			}
 		} catch (contractError) {
-			console.error('Error fetching total supply from contract:', contractError);
-			// Fallback: you might want to get this from your database
-			totalSupply = 0;
+			console.error('❌ Error fetching total supply from contract:', contractError);
+			totalSupply = Math.max(userNFTsOwned, 1);
+			console.log('📊 Using fallback total supply:', totalSupply);
 		}
 
-		// Get current admin disposal amount
+		// Get current disbursement amount
 		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
-		let disposalAmount = 0;
+		let disbursementAmount = 0;
 
 		if (limitsDoc.exists) {
 			const limitsData = limitsDoc.data();
-			disposalAmount = limitsData.totalLimit || 0;
+			disbursementAmount = limitsData.totalLimit || 0;
+			console.log('📊 Disbursement Amount:', disbursementAmount);
+		} else {
+			console.warn('⚠️ No disbursement amount configured');
 		}
 
-		// Calculate user's share: (user tokens / total supply) * disposal amount
-		const sharePercentage = totalSupply > 0 ? (totalNFTsOwned / totalSupply) : 0;
-		const eligibleAmount = disposalAmount * sharePercentage;
+		if (disbursementAmount <= 0) {
+			console.warn('⚠️ No disbursement amount set');
+			return {
+				availableAmount: 0,
+				totalEligible: 0,
+				totalWithdrawn: 0,
+				sharePercentage: 0,
+				disbursementAmount: 0,
+				totalSupply: totalSupply,
+				userNFTsOwned: userNFTsOwned,
+				error: 'No disbursement pool configured'
+			};
+		}
 
-		// Check if user has any pending/completed payouts
-		const payoutHistory = await getUserPayoutHistory(userData.email);
-		const totalPaidOut = payoutHistory.reduce((sum, payout) =>
-			payout.status === 'completed' ? sum + payout.amount : sum, 0
-		);
+		// Calculate total eligible amount
+		const sharePercentage = userNFTsOwned / totalSupply;
+		const totalEligible = disbursementAmount * sharePercentage;
 
-		const availablePayout = Math.max(0, eligibleAmount - totalPaidOut);
+		// Get user's wallet address to check withdrawals
+		const walletAddress = userData.walletAddress;
+		let totalWithdrawn = 0;
 
-		return {
-			totalEligible: eligibleAmount,
-			totalPaidOut: totalPaidOut,
-			availablePayout: availablePayout,
-			sharePercentage: sharePercentage * 100,
-			minimumPayout: 1.00,
-			disposalAmount: disposalAmount,
-			totalSupply: totalSupply
+		if (walletAddress) {
+			try {
+				const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+				if (paypalDoc.exists) {
+					const paypalData = paypalDoc.data();
+					const successfulPayouts = paypalData.payouts || [];
+
+					totalWithdrawn = successfulPayouts
+						.filter(payout => payout.status === 'completed' || payout.status === 'success')
+						.reduce((total, payout) => total + (payout.amount || 0), 0);
+
+					console.log('📊 Total withdrawn from PayPal records:', totalWithdrawn);
+				}
+			} catch (error) {
+				console.error('Error fetching withdrawal history:', error);
+				totalWithdrawn = 0;
+			}
+		}
+
+		// Calculate available amount (eligible - withdrawn)
+		const availableAmount = Math.max(0, totalEligible - totalWithdrawn);
+
+		console.log('📊 Final Calculation:', {
+			userNFTs: userNFTsOwned,
+			totalSupply: totalSupply,
+			sharePercentage: (sharePercentage * 100).toFixed(3) + '%',
+			disbursementAmount: disbursementAmount,
+			totalEligible: totalEligible,
+			totalWithdrawn: totalWithdrawn,
+			availableAmount: availableAmount
+		});
+
+		const result = {
+			availableAmount: Number(availableAmount.toFixed(2)),
+			totalEligible: Number(totalEligible.toFixed(2)),
+			totalWithdrawn: Number(totalWithdrawn.toFixed(2)),
+			sharePercentage: Number((sharePercentage * 100).toFixed(3)),
+			disbursementAmount: Number(disbursementAmount),
+			totalSupply: Number(totalSupply),
+			userNFTsOwned: Number(userNFTsOwned)
 		};
+
+		console.log('✅ Final calculation result:', result);
+		return result;
+
 	} catch (error) {
-		console.error('Error calculating payout:', error);
-		throw error;
+		console.error('❌ Error calculating payout:', error);
+		return {
+			availableAmount: 0,
+			totalEligible: 0,
+			totalWithdrawn: 0,
+			sharePercentage: 0,
+			disbursementAmount: 0,
+			totalSupply: 0,
+			userNFTsOwned: userData?.totalMinted || 0,
+			error: error.message
+		};
 	}
 };
 
@@ -3793,248 +3856,183 @@ app.get('/api/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
 
 // REPLACE: Your existing /api/paypal/:walletAddress/request-payout endpoint
 app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (req, res) => {
-	try {
-		const walletAddress = req.params.walletAddress;
-		const { amount } = req.body;
+  try {
+    const walletAddress = req.params.walletAddress;
 
-		console.log('🔧 Processing payout request with limits check:', {
-			walletAddress,
-			requestedAmount: amount
-		});
+    console.log('🔧 Processing payout request for wallet:', walletAddress);
 
-		// INPUT VALIDATION
-		const payoutAmount = Math.round(parseFloat(amount) * 100) / 100;
-		if (isNaN(payoutAmount) || payoutAmount <= 0) {
-			return res.status(400).json({ error: 'Invalid payout amount' });
-		}
+    // Get and validate PayPal data
+    const paypalRef = db.collection('paypal').doc(walletAddress.toLowerCase());
+    const paypalDoc = await paypalRef.get();
 
-		if (payoutAmount > 20000) { // PayPal's individual limit
-			return res.status(400).json({ error: 'Maximum payout amount is $20,000' });
-		}
+    if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
+      return res.status(400).json({ error: 'PayPal email not configured' });
+    }
 
-		if (payoutAmount < 1.00) {
-			return res.status(400).json({ error: 'Minimum payout amount is $1.00' });
-		}
+    const paypalData = paypalDoc.data();
 
-		// Check decimal places (max 2)
-		if (!/^\d+(\.\d{1,2})?$/.test(payoutAmount.toString())) {
-			return res.status(400).json({ error: 'Amount must have at most 2 decimal places' });
-		}
+    // Security validations
+    if (!paypalData.identityDocument || !paypalData.identityDocument.verified) {
+      return res.status(400).json({
+        error: 'Identity verification required before withdrawals'
+      });
+    }
 
-		// ATOMIC TRANSACTION FOR SECURITY
-		const batch = db.batch();
+    if (!paypalData.taxIdDocument || !paypalData.taxIdDocument.verified) {
+      return res.status(400).json({
+        error: 'Tax ID verification required before withdrawals'
+      });
+    }
 
-		// 1. CHECK ADMIN PAYOUT LIMITS FIRST (CRITICAL)
-		const limitsRef = db.collection('admin_settings').doc('payout_limits');
-		const limitsDoc = await limitsRef.get();
+    // Check for pending payouts
+    const existingPayouts = paypalData.payouts || [];
+    const pendingPayouts = existingPayouts.filter(payout =>
+      payout.status === 'pending' ||
+      payout.status === 'processing' ||
+      payout.paypalStatus === 'PENDING'
+    );
 
-		if (!limitsDoc.exists) {
-			console.log('❌ Payout limits not configured');
-			return res.status(400).json({
-				error: 'Payout system is not configured. Please contact support.'
-			});
-		}
+    if (pendingPayouts.length > 0) {
+      return res.status(400).json({
+        error: 'You have a pending payout. Please wait for it to complete.'
+      });
+    }
 
-		const limitsData = limitsDoc.data();
-		const remainingLimit = Math.max(0, limitsData.totalLimit - (limitsData.usedAmount || 0));
+    // Daily withdrawal limit
+    const today = new Date().toDateString();
+    const todayPayouts = existingPayouts.filter(payout => {
+      const payoutDate = new Date(payout.requestedAt).toDateString();
+      return payoutDate === today && payout.status !== 'failed';
+    });
 
-		if (remainingLimit <= 0) {
-			console.log('❌ Payout limit reached');
-			return res.status(400).json({
-				error: 'Payout limit reached. Please try again later.'
-			});
-		}
+    if (todayPayouts.length > 0) {
+      return res.status(400).json({
+        error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
+      });
+    }
 
-		if (payoutAmount > remainingLimit) {
-			console.log('❌ Admin wallet payout funds limit exceeded');
-			return res.status(400).json({
-				error: `Admin wallet payout funds limit exceeded`,
-				maxAvailable: remainingLimit
-			});
-		}
+    // Get user data and calculate available payout
+    const userSnapshot = await db.collection('users')
+      .where('walletAddress', '==', walletAddress)
+      .get();
 
-		// 2. Get and validate PayPal data
-		const paypalRef = db.collection('paypal').doc(walletAddress.toLowerCase());
-		const paypalDoc = await paypalRef.get();
+    if (userSnapshot.empty) {
+      return res.status(404).json({ error: 'User not found' });
+    }
 
-		if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
-			return res.status(400).json({ error: 'PayPal email not configured' });
-		}
+    const userData = userSnapshot.docs[0].data();
+    
+    // Calculate available payout using the backend function
+    const payoutCalculation = await calculateUserPayout(userData);
+    
+    if (payoutCalculation.error) {
+      return res.status(400).json({ error: payoutCalculation.error });
+    }
 
-		const paypalData = paypalDoc.data();
+    const availableAmount = Number(payoutCalculation.availableAmount) || 0;
 
-		// 3. SECURITY VALIDATIONS
-		if (!paypalData.identityDocument || !paypalData.identityDocument.verified) {
-			return res.status(400).json({
-				error: 'Identity verification required before withdrawals'
-			});
-		}
+    if (availableAmount < 1.00) {
+      return res.status(400).json({
+        error: `Minimum payout amount is $1.00. Available: $${availableAmount.toFixed(2)}`
+      });
+    }
 
-		if (!paypalData.taxIdDocument || !paypalData.taxIdDocument.verified) {
-			return res.status(400).json({
-				error: 'Tax ID verification required before withdrawals'
-			});
-		}
+    // Check if disbursement pool has enough funds
+    const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+    if (!limitsDoc.exists) {
+      return res.status(400).json({
+        error: 'Disbursement system not configured'
+      });
+    }
 
-		// 4. Check for pending payouts
-		const existingPayouts = paypalData.payouts || [];
-		const pendingPayouts = existingPayouts.filter(payout =>
-			payout.status === 'pending' ||
-			payout.status === 'processing' ||
-			payout.paypalStatus === 'PENDING'
-		);
+    const limitsData = limitsDoc.data();
+    const remainingInPool = Math.max(0, (limitsData.totalLimit || 0) - (limitsData.usedAmount || 0));
 
-		if (pendingPayouts.length > 0) {
-			return res.status(400).json({
-				error: 'You have a pending payout. Please wait for it to complete.'
-			});
-		}
+    if (availableAmount > remainingInPool) {
+      return res.status(400).json({
+        error: `Insufficient funds in disbursement pool. Available in pool: $${remainingInPool.toFixed(2)}`
+      });
+    }
 
-		// 5. Daily withdrawal limit (security feature)
-		const today = new Date().toDateString();
-		const todayPayouts = existingPayouts.filter(payout => {
-			const payoutDate = new Date(payout.requestedAt).toDateString();
-			return payoutDate === today && payout.status !== 'failed';
-		});
+    // Create PayPal payout
+    console.log('Processing PayPal payout...');
+    const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-		if (todayPayouts.length > 0) {
-			return res.status(400).json({
-				error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
-			});
-		}
+    const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+    payoutRequest.requestBody({
+      sender_batch_header: {
+        sender_batch_id: payoutId,
+        email_subject: "Withdrawal from Hope KK NFTs",
+        email_message: "You have received a withdrawal from your Hope KK NFT share."
+      },
+      items: [{
+        recipient_type: "EMAIL",
+        amount: {
+          value: availableAmount.toFixed(2),
+          currency: "USD"
+        },
+        receiver: paypalData.paypalEmail,
+        note: `Hope KK NFT Share - ${userData.totalMinted} NFTs out of ${payoutCalculation.totalSupply} total`,
+        sender_item_id: payoutId
+      }]
+    });
 
-		// 6. Verify user's available balance
-		const userSnapshot = await db.collection('users')
-			.where('walletAddress', '==', walletAddress)
-			.get();
+    const response = await paypalClient.execute(payoutRequest);
 
-		if (userSnapshot.empty) {
-			return res.status(404).json({ error: 'User not found' });
-		}
+    // Update disbursement pool usage
+    const newUsedAmount = (limitsData.usedAmount || 0) + availableAmount;
+    await db.collection('admin_settings').doc('payout_limits').update({
+      usedAmount: newUsedAmount,
+      lastUpdated: new Date().toISOString()
+    });
 
-		const userData = userSnapshot.docs[0].data();
-		const totalEarned = (userData.totalMinted || 0) * 10; // $10 per NFT
-		const totalWithdrawn = existingPayouts
-			.filter(p => p.status === 'completed')
-			.reduce((sum, p) => sum + (p.amount || 0), 0);
+    // Record the payout
+    const payoutData = {
+      id: payoutId,
+      amount: availableAmount,
+      status: response.result.batch_header.batch_status.toLowerCase(),
+      paypalBatchId: response.result.batch_header.payout_batch_id,
+      paypalStatus: response.result.batch_header.batch_status,
+      requestedAt: new Date().toISOString(),
+      processedAt: new Date().toISOString(),
+      paypalEmail: paypalData.paypalEmail,
+      walletAddress: walletAddress,
+      userNFTs: userData.totalMinted,
+      totalSupply: payoutCalculation.totalSupply,
+      sharePercentage: payoutCalculation.sharePercentage,
+      disbursementAmount: payoutCalculation.disbursementAmount
+    };
 
-		const availableBalance = Math.max(0, totalEarned - totalWithdrawn);
+    if (response.result.batch_header.batch_status === 'SUCCESS') {
+      payoutData.status = 'completed';
+      payoutData.completedAt = new Date().toISOString();
+    }
 
-		if (payoutAmount > availableBalance) {
-			return res.status(400).json({
-				error: `Insufficient balance. Available: $${availableBalance.toFixed(2)}`
-			});
-		}
+    await paypalRef.update({
+      payouts: [...existingPayouts, payoutData],
+      lastPayoutAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
 
-		// 7. CREATE PAYPAL PAYOUT
-		console.log('Processing PayPal payout with security checks...');
-		const payoutId = `secure_payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    console.log('✅ Payout processed successfully');
+    res.json({
+      success: true,
+      message: 'Withdrawal processed successfully!',
+      payoutId: payoutId,
+      amount: availableAmount,
+      paypalBatchId: response.result.batch_header.payout_batch_id,
+      sharePercentage: payoutCalculation.sharePercentage,
+      estimatedArrival: '1-3 business days'
+    });
 
-		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
-		payoutRequest.requestBody({
-			sender_batch_header: {
-				sender_batch_id: payoutId,
-				email_subject: "Secure Withdrawal from Hope KK NFTs",
-				email_message: "You have received a verified withdrawal from your Hope KK NFT royalties."
-			},
-			items: [{
-				recipient_type: "EMAIL",
-				amount: {
-					value: payoutAmount.toFixed(2),
-					currency: "USD"
-				},
-				receiver: paypalData.paypalEmail,
-				note: `Secure Hope KK NFT Withdrawal - Amount: $${payoutAmount.toFixed(2)} - Verified User`,
-				sender_item_id: payoutId
-			}]
-		});
-
-		const response = await paypalClient.execute(payoutRequest);
-
-		// 8. ATOMIC UPDATE: Deduct from limits and record payout
-		const newUsedAmount = (limitsData.usedAmount || 0) + payoutAmount;
-		batch.update(limitsRef, {
-			usedAmount: newUsedAmount,
-			lastUpdated: new Date().toISOString()
-		});
-
-		// 9. Record the payout
-		const payoutData = {
-			id: payoutId,
-			amount: payoutAmount,
-			status: response.result.batch_header.batch_status.toLowerCase(),
-			paypalBatchId: response.result.batch_header.payout_batch_id,
-			paypalStatus: response.result.batch_header.batch_status,
-			requestedAt: new Date().toISOString(),
-			processedAt: new Date().toISOString(),
-			paypalEmail: paypalData.paypalEmail,
-			walletAddress: walletAddress,
-			identityVerified: true,
-			taxIdVerified: true,
-			remainingLimitAfter: remainingLimit - payoutAmount
-		};
-
-		if (response.result.batch_header.batch_status === 'SUCCESS') {
-			payoutData.status = 'completed';
-			payoutData.completedAt = new Date().toISOString();
-		}
-
-		batch.update(paypalRef, {
-			payouts: [...existingPayouts, payoutData],
-			lastPayoutAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString()
-		});
-
-		// 10. Audit log
-		batch.set(db.collection('payout_audit_log').doc(), {
-			walletAddress: walletAddress,
-			amount: payoutAmount,
-			paypalEmail: paypalData.paypalEmail,
-			batchId: response.result.batch_header.payout_batch_id,
-			timestamp: new Date(),
-			status: 'initiated',
-			remainingLimit: remainingLimit - payoutAmount,
-			userBalance: availableBalance,
-			ip: req.ip || 'unknown'
-		});
-
-		// Commit atomic transaction
-		await batch.commit();
-
-		console.log('✅ Secure payout processed successfully');
-		res.json({
-			success: true,
-			message: 'Secure withdrawal processed successfully!',
-			payoutId: payoutId,
-			amount: payoutAmount,
-			paypalBatchId: response.result.batch_header.payout_batch_id,
-			remainingLimit: remainingLimit - payoutAmount,
-			estimatedArrival: '1-3 business days'
-		});
-
-	} catch (error) {
-		console.error('❌ Secure payout failed:', error);
-
-		// Store failed payout for audit
-		try {
-			await db.collection('payout_audit_log').add({
-				walletAddress: req.params.walletAddress,
-				amount: parseFloat(req.body.amount),
-				status: 'failed',
-				error: error.message,
-				timestamp: new Date(),
-				ip: req.ip || 'unknown'
-			});
-		} catch (auditError) {
-			console.error('Error logging failed payout:', auditError);
-		}
-
-		res.status(500).json({
-			success: false,
-			error: 'Withdrawal failed. Please try again.',
-			details: error.message
-		});
-	}
+  } catch (error) {
+    console.error('❌ Payout failed:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Withdrawal failed. Please try again.',
+      details: error.message
+    });
+  }
 });
 
 // Get current payout limits
