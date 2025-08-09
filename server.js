@@ -3803,7 +3803,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		});
 
 		// INPUT VALIDATION
-		const payoutAmount = parseFloat(amount);
+		const payoutAmount = Math.round(parseFloat(amount) * 100) / 100;
 		if (isNaN(payoutAmount) || payoutAmount <= 0) {
 			return res.status(400).json({ error: 'Invalid payout amount' });
 		}
