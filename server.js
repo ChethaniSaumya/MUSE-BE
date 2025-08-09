@@ -1880,18 +1880,18 @@ const authenticateAdmin = async (req, res, next) => {
 	try {
 		// 1. Extract admin key from headers or query
 		const adminKey = req.headers['x-admin-key'] || req.query.adminKey;
-		const expectedKey = process.env.ADMIN_API_KEY;
+		const expectedKey = process.env.ADMIN_API_KEY || process.env.REACT_APP_ADMIN_KEY;
 
 		// 2. Key validation
 		if (!adminKey || adminKey !== expectedKey) {
-			// Log unauthorized attempt (using your existing db reference)
+			// Log unauthorized attempt
 			await db.collection('security_log').add({
 				event: 'unauthorized_admin_attempt',
 				ip: req.ip,
 				userAgent: req.get('User-Agent'),
-				timestamp: admin.firestore.FieldValue.serverTimestamp(), // Now using properly initialized admin
+				timestamp: admin.firestore.FieldValue.serverTimestamp(),
 				endpoint: req.path,
-				attemptedKey: adminKey ? 'REDACTED' : 'MISSING' // Never log actual keys
+				attemptedKey: adminKey ? 'REDACTED' : 'MISSING'
 			});
 
 			return res.status(401).json({
@@ -1900,7 +1900,7 @@ const authenticateAdmin = async (req, res, next) => {
 			});
 		}
 
-		// 4. Log successful admin access (preserving your existing logging)
+		// 3. Log successful admin access
 		await db.collection('admin_access_log').add({
 			ip: req.ip,
 			endpoint: req.path,
@@ -1909,36 +1909,49 @@ const authenticateAdmin = async (req, res, next) => {
 			userAgent: req.get('User-Agent')
 		});
 
-		// 5. Add admin context to request for downstream middleware
+		// 4. Add admin context to request
 		req.adminContext = {
 			authenticatedAt: new Date().toISOString(),
 			accessMethod: adminKey === req.query.adminKey ? 'query' : 'header',
-			adminId: 'admin' // Add this line
+			adminId: 'admin'
 		};
 
 		next();
 
 	} catch (error) {
 		console.error('Admin authentication system error:', error);
-
-		// Secure error response - don't expose internal details
 		res.status(500).json({
 			error: 'Authentication system error',
 			code: 'AUTH_SYSTEM_FAILURE'
 		});
-
-		// Critical security error - should be alerted
-		await db.collection('security_errors').add({
-			error: 'Admin auth system failure',
-			stack: error.stack,
-			timestamp: admin.firestore.FieldValue.serverTimestamp(),
-			severity: 'CRITICAL'
-		});
 	}
 };
 
-//app.use('/api/admin/payout-limits', adminLimiter);
-//app.use('/api/admin/refresh-payout-status', adminLimiter);
+// Add this endpoint around line 1200 (near other payout endpoints)
+app.get('/api/payout-limits/current', cors(corsOptions), async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				totalLimit: 0,
+				isActive: false
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		res.json({
+			totalLimit: data.totalLimit || 0,
+			remainingLimit: remainingLimit,
+			isActive: remainingLimit > 0
+		});
+	} catch (error) {
+		console.error('Error fetching current payout limits:', error);
+		res.status(500).json({ error: 'Failed to fetch payout limits' });
+	}
+});
 
 // ADD: Public endpoint to show remaining limits (without admin auth)
 app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
@@ -2079,53 +2092,6 @@ app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
 	} catch (error) {
 		console.error('Error fetching public limits:', error);
 		res.status(500).json({ error: 'Failed to fetch limits' });
-	}
-});
-
-// Admin endpoints with authentication
-app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async (req, res) => {
-	try {
-		const { totalLimit, resetPeriod = 'monthly' } = req.body;
-
-		// Validation
-		if (!totalLimit || totalLimit <= 0) {
-			return res.status(400).json({ error: 'Total limit must be greater than 0' });
-		}
-
-		if (totalLimit > 100000) {
-			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
-		}
-
-		const now = new Date();
-
-		await db.collection('admin_settings').doc('payout_limits').set({
-			totalLimit: parseFloat(totalLimit),
-			usedAmount: 0,
-			lastReset: now,
-			resetPeriod: resetPeriod,
-			updatedAt: now,
-			updatedBy: req.adminContext?.adminId || 'admin' // Safe fallback
-		});
-
-		// Audit log
-		await db.collection('admin_audit_log').add({
-			action: 'payout_limit_updated',
-			oldLimit: req.body.previousLimit || null,
-			newLimit: totalLimit,
-			timestamp: now,
-			adminId: req.adminContext?.adminId || 'admin', // Safe fallback
-			ip: req.ip || 'unknown'
-		});
-
-		res.json({
-			success: true,
-			message: 'Payout limit updated successfully',
-			totalLimit: parseFloat(totalLimit),
-			remainingLimit: parseFloat(totalLimit)
-		});
-	} catch (error) {
-		console.error('Error setting payout limits:', error);
-		res.status(500).json({ error: 'Failed to set payout limits' });
 	}
 });
 
@@ -3414,18 +3380,35 @@ app.get('/api/certificates/:tokenId', cors(corsOptions), async (req, res) => {
 
 const calculateUserPayout = async (userData) => {
 	try {
-		// Your existing calculation logic
 		const totalNFTsOwned = userData.totalMinted || 0;
-		const totalSupply = 25000; // Your max supply
 
-		// Example calculation - adjust based on your tokenomics
-		const sharePercentage = (totalNFTsOwned / totalSupply) * 100;
+		// Get total supply from contract (you'll need to implement this in backend)
+		// For now, we'll use the totalSupply that's already being fetched in frontend
+		// The backend calculation should match the frontend
+		let totalSupply = 0;
 
-		// Get total available payout pool (you'll need to implement this)
-		const totalPayoutPool = await getTotalPayoutPool();
+		try {
+			// Get total supply from your contract
+			totalSupply = await nftContract.methods.totalSupply().call();
+			totalSupply = Number(totalSupply);
+		} catch (contractError) {
+			console.error('Error fetching total supply from contract:', contractError);
+			// Fallback: you might want to get this from your database
+			totalSupply = 0;
+		}
 
-		// Calculate user's eligible amount
-		const eligibleAmount = (totalPayoutPool * sharePercentage / 100);
+		// Get current admin disposal amount
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+		let disposalAmount = 0;
+
+		if (limitsDoc.exists) {
+			const limitsData = limitsDoc.data();
+			disposalAmount = limitsData.totalLimit || 0;
+		}
+
+		// Calculate user's share: (user tokens / total supply) * disposal amount
+		const sharePercentage = totalSupply > 0 ? (totalNFTsOwned / totalSupply) : 0;
+		const eligibleAmount = disposalAmount * sharePercentage;
 
 		// Check if user has any pending/completed payouts
 		const payoutHistory = await getUserPayoutHistory(userData.email);
@@ -3439,8 +3422,10 @@ const calculateUserPayout = async (userData) => {
 			totalEligible: eligibleAmount,
 			totalPaidOut: totalPaidOut,
 			availablePayout: availablePayout,
-			sharePercentage: sharePercentage,
-			minimumPayout: 1.00 // Minimum $1 USD payout
+			sharePercentage: sharePercentage * 100,
+			minimumPayout: 1.00,
+			disposalAmount: disposalAmount,
+			totalSupply: totalSupply
 		};
 	} catch (error) {
 		console.error('Error calculating payout:', error);
@@ -5139,17 +5124,17 @@ app.get('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
 	}
 });
 
-// ADD: Set/Update payout limits
-app.post('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
+// Update your existing POST endpoint for payout limits
+app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async (req, res) => {
 	try {
-		const { totalLimit } = req.body;
+		const { totalLimit, period, projectName, comments } = req.body; // ADD projectName here
 
 		// Validation
 		if (!totalLimit || totalLimit <= 0) {
 			return res.status(400).json({ error: 'Total limit must be greater than 0' });
 		}
 
-		if (totalLimit > 100000) { // Reasonable max limit
+		if (totalLimit > 100000) {
 			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
 		}
 
@@ -5159,6 +5144,7 @@ app.post('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
 		const currentDoc = await db.collection('admin_settings').doc('payout_limits').get();
 		const oldLimit = currentDoc.exists ? currentDoc.data().totalLimit : null;
 
+		// Set the new payout limit
 		await db.collection('admin_settings').doc('payout_limits').set({
 			totalLimit: parseFloat(totalLimit),
 			usedAmount: 0, // Reset used amount when setting new limit
@@ -5167,11 +5153,26 @@ app.post('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
 			updatedBy: 'admin'
 		});
 
+		// Record this disbursement in history
+		await db.collection('disbursement_history').add({
+			totalLimit: parseFloat(totalLimit),
+			period: period || 'Not specified',
+			projectName: projectName || null, // ADD this
+			comments: comments || null,
+			usedAmount: 0,
+			isActive: true,
+			createdAt: now.toISOString(),
+			createdBy: 'admin',
+			disbursementId: `disbursement_${Date.now()}`
+		});
+
 		// Log the change for audit trail
 		await db.collection('admin_audit_log').add({
 			action: 'payout_limit_updated',
 			oldLimit: oldLimit,
 			newLimit: parseFloat(totalLimit),
+			period: period,
+			projectName: projectName, // ADD this
 			timestamp: now,
 			adminId: 'admin',
 			ip: req.ip
@@ -5254,6 +5255,96 @@ app.post('/api/admin/set-payout-limit', cors(corsOptions), async (req, res) => {
 	} catch (error) {
 		console.error('Error setting payout limit:', error);
 		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// GET disbursement history with pagination
+app.get('/api/admin/disbursement-history', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const {
+			page = 1,
+			limit = 10,
+			search = ''
+		} = req.query;
+
+		console.log('🔍 Fetching disbursement history with filters:', { page, limit, search });
+
+		// Build query
+		let query = db.collection('disbursement_history');
+
+		// Apply search filter if provided
+		if (search) {
+			// Since Firestore doesn't support full-text search, we'll get all and filter in memory
+			// For production, consider using Algolia or similar for better search
+		}
+
+		// Get all documents (we'll handle pagination in memory for simplicity)
+		const snapshot = await query.orderBy('createdAt', 'desc').get();
+
+		let allRecords = [];
+		snapshot.forEach(doc => {
+			const data = doc.data();
+			allRecords.push({
+				id: doc.id,
+				...data,
+				// Ensure createdAt is properly formatted
+				createdAt: data.createdAt || new Date().toISOString()
+			});
+		});
+
+		// Apply search filter in memory
+		if (search) {
+			const searchLower = search.toLowerCase();
+			allRecords = allRecords.filter(record =>
+				(record.period && record.period.toLowerCase().includes(searchLower)) ||
+				(record.projectName && record.projectName.toLowerCase().includes(searchLower)) ||
+				(record.comments && record.comments.toLowerCase().includes(searchLower)) ||
+				(record.disbursementId && record.disbursementId.toLowerCase().includes(searchLower))
+			);
+		}
+
+		// Calculate statistics
+		const stats = {
+			totalDisbursements: allRecords.length,
+			totalAmountDisbursed: allRecords.reduce((sum, record) => sum + (record.totalLimit || 0), 0),
+			totalAmountUsed: allRecords.reduce((sum, record) => sum + (record.usedAmount || 0), 0),
+			activeDisbursements: allRecords.filter(record => record.isActive).length
+		};
+
+		// Apply pagination
+		const totalRecords = allRecords.length;
+		const totalPages = Math.ceil(totalRecords / parseInt(limit));
+		const startIndex = (parseInt(page) - 1) * parseInt(limit);
+		const endIndex = startIndex + parseInt(limit);
+
+		const paginatedRecords = allRecords.slice(startIndex, endIndex);
+
+		// Pagination info
+		const pagination = {
+			currentPage: parseInt(page),
+			totalPages,
+			totalRecords,
+			hasNextPage: parseInt(page) < totalPages,
+			hasPrevPage: parseInt(page) > 1
+		};
+
+		console.log(`✅ Returning ${paginatedRecords.length} of ${totalRecords} disbursement records (page ${page}/${totalPages})`);
+
+		res.json({
+			success: true,
+			records: paginatedRecords,
+			pagination,
+			stats,
+			filters: { search }
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching disbursement history:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Internal server error',
+			details: error.message
+		});
 	}
 });
 
