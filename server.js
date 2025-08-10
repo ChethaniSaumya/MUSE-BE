@@ -3430,7 +3430,7 @@ const calculateUserPayout = async (userData) => {
 
 		// Calculate total eligible amount
 		const sharePercentage = userNFTsOwned / totalSupply;
-		const totalEligible = disbursementAmount * sharePercentage;
+		const totalEligible = (disbursementAmount * sharePercentage) * 4; // Multiply by 4
 
 		// Get user's wallet address to check withdrawals
 		const walletAddress = userData.walletAddress;
