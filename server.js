@@ -3434,7 +3434,7 @@ const calculateUserPayout = async (userData) => {
 
 		const sharePercentage = userNFTsOwned / totalSupply;
 		const totalEligible = disbursementAmount * sharePercentage;
-		
+
 		// Get user's wallet address to check withdrawals
 		const walletAddress = userData.walletAddress;
 		let totalWithdrawn = 0;
@@ -3859,183 +3859,214 @@ app.get('/api/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
 
 // REPLACE: Your existing /api/paypal/:walletAddress/request-payout endpoint
 app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (req, res) => {
-  try {
-    const walletAddress = req.params.walletAddress;
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { amount: requestedAmount } = req.body;  // Get the user-requested amount
 
-    console.log('🔧 Processing payout request for wallet:', walletAddress);
+		console.log('🔧 Processing payout request for wallet:', walletAddress);
+		console.log('💰 Requested amount from user:', requestedAmount);
 
-    // Get and validate PayPal data
-    const paypalRef = db.collection('paypal').doc(walletAddress.toLowerCase());
-    const paypalDoc = await paypalRef.get();
+		// Get and validate PayPal data
+		const paypalRef = db.collection('paypal').doc(walletAddress.toLowerCase());
+		const paypalDoc = await paypalRef.get();
 
-    if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
-      return res.status(400).json({ error: 'PayPal email not configured' });
-    }
+		if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
+			return res.status(400).json({ error: 'PayPal email not configured' });
+		}
 
-    const paypalData = paypalDoc.data();
+		const paypalData = paypalDoc.data();
 
-    // Security validations
-    if (!paypalData.identityDocument || !paypalData.identityDocument.verified) {
-      return res.status(400).json({
-        error: 'Identity verification required before withdrawals'
-      });
-    }
+		// Security validations
+		if (!paypalData.identityDocument || !paypalData.identityDocument.verified) {
+			return res.status(400).json({
+				error: 'Identity verification required before withdrawals'
+			});
+		}
 
-    if (!paypalData.taxIdDocument || !paypalData.taxIdDocument.verified) {
-      return res.status(400).json({
-        error: 'Tax ID verification required before withdrawals'
-      });
-    }
+		if (!paypalData.taxIdDocument || !paypalData.taxIdDocument.verified) {
+			return res.status(400).json({
+				error: 'Tax ID verification required before withdrawals'
+			});
+		}
 
-    // Check for pending payouts
-    const existingPayouts = paypalData.payouts || [];
-    const pendingPayouts = existingPayouts.filter(payout =>
-      payout.status === 'pending' ||
-      payout.status === 'processing' ||
-      payout.paypalStatus === 'PENDING'
-    );
+		// Check for pending payouts
+		const existingPayouts = paypalData.payouts || [];
+		const pendingPayouts = existingPayouts.filter(payout =>
+			payout.status === 'pending' ||
+			payout.status === 'processing' ||
+			payout.paypalStatus === 'PENDING'
+		);
 
-    if (pendingPayouts.length > 0) {
-      return res.status(400).json({
-        error: 'You have a pending payout. Please wait for it to complete.'
-      });
-    }
+		if (pendingPayouts.length > 0) {
+			return res.status(400).json({
+				error: 'You have a pending payout. Please wait for it to complete.'
+			});
+		}
 
-    // Daily withdrawal limit
-    const today = new Date().toDateString();
-    const todayPayouts = existingPayouts.filter(payout => {
-      const payoutDate = new Date(payout.requestedAt).toDateString();
-      return payoutDate === today && payout.status !== 'failed';
-    });
+		// Daily withdrawal limit
+		const today = new Date().toDateString();
+		const todayPayouts = existingPayouts.filter(payout => {
+			const payoutDate = new Date(payout.requestedAt).toDateString();
+			return payoutDate === today && payout.status !== 'failed';
+		});
 
-    if (todayPayouts.length > 0) {
-      return res.status(400).json({
-        error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
-      });
-    }
+		if (todayPayouts.length > 0) {
+			return res.status(400).json({
+				error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
+			});
+		}
 
-    // Get user data and calculate available payout
-    const userSnapshot = await db.collection('users')
-      .where('walletAddress', '==', walletAddress)
-      .get();
+		// Get user data and calculate available payout
+		const userSnapshot = await db.collection('users')
+			.where('walletAddress', '==', walletAddress)
+			.get();
 
-    if (userSnapshot.empty) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+		if (userSnapshot.empty) {
+			return res.status(404).json({ error: 'User not found' });
+		}
 
-    const userData = userSnapshot.docs[0].data();
-    
-    // Calculate available payout using the backend function
-    const payoutCalculation = await calculateUserPayout(userData);
-    
-    if (payoutCalculation.error) {
-      return res.status(400).json({ error: payoutCalculation.error });
-    }
+		const userData = userSnapshot.docs[0].data();
 
-    const availableAmount = Number(payoutCalculation.availableAmount) || 0;
+		// Calculate available payout using the backend function
+		const payoutCalculation = await calculateUserPayout(userData);
 
-    if (availableAmount < 1.00) {
-      return res.status(400).json({
-        error: `Minimum payout amount is $1.00. Available: $${availableAmount.toFixed(2)}`
-      });
-    }
+		if (payoutCalculation.error) {
+			return res.status(400).json({ error: payoutCalculation.error });
+		}
 
-    // Check if disbursement pool has enough funds
-    const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
-    if (!limitsDoc.exists) {
-      return res.status(400).json({
-        error: 'Disbursement system not configured'
-      });
-    }
+		const availableAmount = Number(payoutCalculation.availableAmount) || 0;
 
-    const limitsData = limitsDoc.data();
-    const remainingInPool = Math.max(0, (limitsData.totalLimit || 0) - (limitsData.usedAmount || 0));
+		// IMPORTANT: Use requested amount if provided, otherwise use available amount
+		const withdrawAmount = requestedAmount ? parseFloat(requestedAmount) : availableAmount;
 
-    if (availableAmount > remainingInPool) {
-      return res.status(400).json({
-        error: `Insufficient funds in disbursement pool. Available in pool: $${remainingInPool.toFixed(2)}`
-      });
-    }
+		console.log('📊 Available amount:', availableAmount.toFixed(2));
+		console.log('💵 Withdrawal amount:', withdrawAmount.toFixed(2));
 
-    // Create PayPal payout
-    console.log('Processing PayPal payout...');
-    const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+		// Validate withdrawal amount
+		if (!withdrawAmount || withdrawAmount < 1.00) {
+			return res.status(400).json({
+				error: `Minimum payout amount is $1.00. You requested: $${withdrawAmount?.toFixed(2) || '0.00'}`
+			});
+		}
 
-    const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
-    payoutRequest.requestBody({
-      sender_batch_header: {
-        sender_batch_id: payoutId,
-        email_subject: "Withdrawal from Hope KK NFTs",
-        email_message: "You have received a withdrawal from your Hope KK NFT share."
-      },
-      items: [{
-        recipient_type: "EMAIL",
-        amount: {
-          value: availableAmount.toFixed(2),
-          currency: "USD"
-        },
-        receiver: paypalData.paypalEmail,
-        note: `Hope KK NFT Share - ${userData.totalMinted} NFTs out of ${payoutCalculation.totalSupply} total`,
-        sender_item_id: payoutId
-      }]
-    });
+		if (withdrawAmount > availableAmount) {
+			return res.status(400).json({
+				error: `Requested amount exceeds available balance. Requested: $${withdrawAmount.toFixed(2)}, Available: $${availableAmount.toFixed(2)}`
+			});
+		}
 
-    const response = await paypalClient.execute(payoutRequest);
+		// Check the $0.03 minimum balance rule
+		const remainingAfterWithdrawal = availableAmount - withdrawAmount;
+		if (remainingAfterWithdrawal > 0 && remainingAfterWithdrawal < 0.03) {
+			return res.status(400).json({
+				error: `Withdrawal would leave $${remainingAfterWithdrawal.toFixed(2)}. Please withdraw the full amount or leave at least $0.03`
+			});
+		}
 
-    // Update disbursement pool usage
-    const newUsedAmount = (limitsData.usedAmount || 0) + availableAmount;
-    await db.collection('admin_settings').doc('payout_limits').update({
-      usedAmount: newUsedAmount,
-      lastUpdated: new Date().toISOString()
-    });
+		// Check if disbursement pool has enough funds
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+		if (!limitsDoc.exists) {
+			return res.status(400).json({
+				error: 'Disbursement system not configured'
+			});
+		}
 
-    // Record the payout
-    const payoutData = {
-      id: payoutId,
-      amount: availableAmount,
-      status: response.result.batch_header.batch_status.toLowerCase(),
-      paypalBatchId: response.result.batch_header.payout_batch_id,
-      paypalStatus: response.result.batch_header.batch_status,
-      requestedAt: new Date().toISOString(),
-      processedAt: new Date().toISOString(),
-      paypalEmail: paypalData.paypalEmail,
-      walletAddress: walletAddress,
-      userNFTs: userData.totalMinted,
-      totalSupply: payoutCalculation.totalSupply,
-      sharePercentage: payoutCalculation.sharePercentage,
-      disbursementAmount: payoutCalculation.disbursementAmount
-    };
+		const limitsData = limitsDoc.data();
+		const remainingInPool = Math.max(0, (limitsData.totalLimit || 0) - (limitsData.usedAmount || 0));
 
-    if (response.result.batch_header.batch_status === 'SUCCESS') {
-      payoutData.status = 'completed';
-      payoutData.completedAt = new Date().toISOString();
-    }
+		if (withdrawAmount > remainingInPool) {
+			return res.status(400).json({
+				error: `Insufficient funds in disbursement pool. Available in pool: $${remainingInPool.toFixed(2)}`
+			});
+		}
 
-    await paypalRef.update({
-      payouts: [...existingPayouts, payoutData],
-      lastPayoutAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
+		// Create PayPal payout
+		console.log('Processing PayPal payout...');
+		console.log('Amount to withdraw:', withdrawAmount.toFixed(2));
 
-    console.log('✅ Payout processed successfully');
-    res.json({
-      success: true,
-      message: 'Withdrawal processed successfully!',
-      payoutId: payoutId,
-      amount: availableAmount,
-      paypalBatchId: response.result.batch_header.payout_batch_id,
-      sharePercentage: payoutCalculation.sharePercentage,
-      estimatedArrival: '1-3 business days'
-    });
+		const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-  } catch (error) {
-    console.error('❌ Payout failed:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Withdrawal failed. Please try again.',
-      details: error.message
-    });
-  }
+		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+		payoutRequest.requestBody({
+			sender_batch_header: {
+				sender_batch_id: payoutId,
+				email_subject: "Withdrawal from Hope KK NFTs",
+				email_message: "You have received a withdrawal from your Hope KK NFT share."
+			},
+			items: [{
+				recipient_type: "EMAIL",
+				amount: {
+					value: withdrawAmount.toFixed(2),  // USE withdrawAmount HERE
+					currency: "USD"
+				},
+				receiver: paypalData.paypalEmail,
+				note: `Hope KK NFT Share - ${userData.totalMinted} NFTs out of ${payoutCalculation.totalSupply} total`,
+				sender_item_id: payoutId
+			}]
+		});
+
+		const response = await paypalClient.execute(payoutRequest);
+
+		// Update disbursement pool usage with the actual withdrawn amount
+		const newUsedAmount = (limitsData.usedAmount || 0) + withdrawAmount;
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: newUsedAmount,
+			lastUpdated: new Date().toISOString()
+		});
+
+		// Record the payout with the actual withdrawn amount
+		const payoutData = {
+			id: payoutId,
+			amount: withdrawAmount,  // Record the actual withdrawn amount
+			status: response.result.batch_header.batch_status.toLowerCase(),
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			paypalStatus: response.result.batch_header.batch_status,
+			requestedAt: new Date().toISOString(),
+			processedAt: new Date().toISOString(),
+			paypalEmail: paypalData.paypalEmail,
+			walletAddress: walletAddress,
+			userNFTs: userData.totalMinted,
+			totalSupply: payoutCalculation.totalSupply,
+			sharePercentage: payoutCalculation.sharePercentage,
+			disbursementAmount: payoutCalculation.disbursementAmount,
+			availableAtTimeOfWithdrawal: availableAmount,  // Track what was available
+			amountWithdrawn: withdrawAmount  // Track what was actually withdrawn
+		};
+
+		if (response.result.batch_header.batch_status === 'SUCCESS') {
+			payoutData.status = 'completed';
+			payoutData.completedAt = new Date().toISOString();
+		}
+
+		await paypalRef.update({
+			payouts: [...existingPayouts, payoutData],
+			lastPayoutAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		});
+
+		console.log('✅ Payout processed successfully');
+		console.log('💸 Amount withdrawn:', withdrawAmount.toFixed(2));
+		console.log('💰 Remaining available:', remainingAfterWithdrawal.toFixed(2));
+
+		res.json({
+			success: true,
+			message: `Withdrawal of $${withdrawAmount.toFixed(2)} processed successfully!`,
+			payoutId: payoutId,
+			amount: withdrawAmount,
+			remainingBalance: remainingAfterWithdrawal,
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			sharePercentage: payoutCalculation.sharePercentage,
+			estimatedArrival: '1-3 business days'
+		});
+
+	} catch (error) {
+		console.error('❌ Payout failed:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Withdrawal failed. Please try again.',
+			details: error.message
+		});
+	}
 });
 
 // Get current payout limits
@@ -4827,81 +4858,81 @@ const sendPayoutConfirmationEmail = async (userEmail, userName, amount) => {
 			to: userEmail,
 			subject: '🎉 Your Hope KK NFT Payout is Processing!',
 			html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body {
-              font-family: 'Arial', sans-serif;
-              line-height: 1.6;
-              color: #333;
-              max-width: 600px;
-              margin: 0 auto;
-              padding: 20px;
-              background-color: #f4f4f4;
-            }
-            .email-container {
-              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-              border-radius: 15px;
-              padding: 30px;
-              box-shadow: 0 10px 25px rgba(0,0,0,0.1);
-            }
-            .header {
-              text-align: center;
-              color: white;
-              margin-bottom: 30px;
-            }
-            .content {
-              background: white;
-              padding: 30px;
-              border-radius: 10px;
-              margin: 20px 0;
-              box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-            }
-            .payout-info {
-              background: #f8f9fa;
-              padding: 20px;
-              border-radius: 8px;
-              margin: 20px 0;
-              border-left: 4px solid #28a745;
-            }
-            .amount {
-              font-size: 2rem;
-              font-weight: bold;
-              color: #28a745;
-              text-align: center;
-              margin: 20px 0;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="email-container">
-            <div class="header">
-              <h1>💰 Payout Processing</h1>
-            </div>
-            
-            <div class="content">
-              <h2>Hello ${userName}! 👋</h2>
-              
-              <p>Great news! Your Hope KK NFT royalty payout is now being processed.</p>
-              
-              <div class="amount">$${amount.toFixed(2)} USD</div>
-              
-              <div class="payout-info">
-                <h3>📋 Payout Details:</h3>
-                <p><strong>Amount:</strong> $${amount.toFixed(2)} USD</p>
-                <p><strong>Status:</strong> Processing</p>
-                <p><strong>Estimated Arrival:</strong> 1-3 business days</p>
-              </div>
-              
-              <p>Your payout will be sent to your registered PayPal email address. You'll receive a separate notification from PayPal once the funds are available.</p>
-              
-              <p>Thank you for being part of the Hope KK NFT community!</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
+		<!DOCTYPE html>
+		<html>
+		<head>
+		  <style>
+			body {
+			  font-family: 'Arial', sans-serif;
+			  line-height: 1.6;
+			  color: #333;
+			  max-width: 600px;
+			  margin: 0 auto;
+			  padding: 20px;
+			  background-color: #f4f4f4;
+			}
+			.email-container {
+			  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+			  border-radius: 15px;
+			  padding: 30px;
+			  box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+			}
+			.header {
+			  text-align: center;
+			  color: white;
+			  margin-bottom: 30px;
+			}
+			.content {
+			  background: white;
+			  padding: 30px;
+			  border-radius: 10px;
+			  margin: 20px 0;
+			  box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+			}
+			.payout-info {
+			  background: #f8f9fa;
+			  padding: 20px;
+			  border-radius: 8px;
+			  margin: 20px 0;
+			  border-left: 4px solid #28a745;
+			}
+			.amount {
+			  font-size: 2rem;
+			  font-weight: bold;
+			  color: #28a745;
+			  text-align: center;
+			  margin: 20px 0;
+			}
+		  </style>
+		</head>
+		<body>
+		  <div class="email-container">
+			<div class="header">
+			  <h1>💰 Payout Processing</h1>
+			</div>
+			
+			<div class="content">
+			  <h2>Hello ${userName}! 👋</h2>
+			  
+			  <p>Great news! Your Hope KK NFT royalty payout is now being processed.</p>
+			  
+			  <div class="amount">$${amount.toFixed(2)} USD</div>
+			  
+			  <div class="payout-info">
+				<h3>📋 Payout Details:</h3>
+				<p><strong>Amount:</strong> $${amount.toFixed(2)} USD</p>
+				<p><strong>Status:</strong> Processing</p>
+				<p><strong>Estimated Arrival:</strong> 1-3 business days</p>
+			  </div>
+			  
+			  <p>Your payout will be sent to your registered PayPal email address. You'll receive a separate notification from PayPal once the funds are available.</p>
+			  
+			  <p>Thank you for being part of the Hope KK NFT community!</p>
+			</div>
+		  </div>
+		</body>
+		</html>
+	  `
 		};
 
 		const result = await emailTransporter.sendMail(mailOptions);
