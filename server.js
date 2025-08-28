@@ -3428,12 +3428,11 @@ const calculateUserPayout = async (userData) => {
 			};
 		}
 
-		// Calculate total eligible amount
-		//const sharePercentage = userNFTsOwned / totalSupply;
-		//const totalEligible = (disbursementAmount * sharePercentage) * 4; // Multiply by 4
-
+		// 🎯 MAXIMUM LIMIT EQUATION LOGIC IS HERE:
 		const sharePercentage = userNFTsOwned / totalSupply;
 		const totalEligible = disbursementAmount * sharePercentage;
+		// Note: The commented line below shows the previous *4 multiplier that was removed
+		// const totalEligible = (disbursementAmount * sharePercentage) * 4; // Multiply by 4
 
 		// Get user's wallet address to check withdrawals
 		const walletAddress = userData.walletAddress;
@@ -3996,7 +3995,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			items: [{
 				recipient_type: "EMAIL",
 				amount: {
-					value: withdrawAmount.toFixed(2),  // USE withdrawAmount HERE
+					value: withdrawAmount.toFixed(2),
 					currency: "USD"
 				},
 				receiver: paypalData.paypalEmail,
@@ -4017,8 +4016,8 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		// Record the payout with the actual withdrawn amount
 		const payoutData = {
 			id: payoutId,
-			amount: withdrawAmount,  // Record the actual withdrawn amount
-			status: response.result.batch_header.batch_status.toLowerCase(),
+			amount: withdrawAmount,
+			status: 'pending', // Always start as pending
 			paypalBatchId: response.result.batch_header.payout_batch_id,
 			paypalStatus: response.result.batch_header.batch_status,
 			requestedAt: new Date().toISOString(),
@@ -4029,14 +4028,9 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			totalSupply: payoutCalculation.totalSupply,
 			sharePercentage: payoutCalculation.sharePercentage,
 			disbursementAmount: payoutCalculation.disbursementAmount,
-			availableAtTimeOfWithdrawal: availableAmount,  // Track what was available
-			amountWithdrawn: withdrawAmount  // Track what was actually withdrawn
+			availableAtTimeOfWithdrawal: availableAmount,
+			amountWithdrawn: withdrawAmount
 		};
-
-		if (response.result.batch_header.batch_status === 'SUCCESS') {
-			payoutData.status = 'completed';
-			payoutData.completedAt = new Date().toISOString();
-		}
 
 		await paypalRef.update({
 			payouts: [...existingPayouts, payoutData],
@@ -4044,19 +4038,23 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			updatedAt: new Date().toISOString()
 		});
 
-		console.log('✅ Payout processed successfully');
-		console.log('💸 Amount withdrawn:', withdrawAmount.toFixed(2));
+		console.log('✅ Payout submitted - Status:', response.result.batch_header.batch_status);
+		console.log('💸 Amount requested:', withdrawAmount.toFixed(2));
 		console.log('💰 Remaining available:', remainingAfterWithdrawal.toFixed(2));
 
+		// 🎯 NEVER SHOW SUCCESS IMMEDIATELY - ALL PAYOUTS ARE PENDING INITIALLY
 		res.json({
-			success: true,
-			message: `Withdrawal of $${withdrawAmount.toFixed(2)} processed successfully!`,
+			success: false, // Always false initially
+			message: `Withdrawal request of $${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
 			payoutId: payoutId,
 			amount: withdrawAmount,
 			remainingBalance: remainingAfterWithdrawal,
 			paypalBatchId: response.result.batch_header.payout_batch_id,
 			sharePercentage: payoutCalculation.sharePercentage,
-			estimatedArrival: '1-3 business days'
+			estimatedArrival: '1-3 business days',
+			status: 'pending',
+			paypalStatus: response.result.batch_header.batch_status,
+			note: 'Your withdrawal is being processed. Check back later for status updates.'
 		});
 
 	} catch (error) {
