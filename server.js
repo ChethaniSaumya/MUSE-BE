@@ -3903,7 +3903,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		}
 
 		// Daily withdrawal limit
-		const today = new Date().toDateString();
+		/*const today = new Date().toDateString();
 		const todayPayouts = existingPayouts.filter(payout => {
 			const payoutDate = new Date(payout.requestedAt).toDateString();
 			return payoutDate === today && payout.status !== 'failed';
@@ -3913,7 +3913,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			return res.status(400).json({
 				error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
 			});
-		}
+		}*/
 
 		// Get user data and calculate available payout
 		const userSnapshot = await db.collection('users')
