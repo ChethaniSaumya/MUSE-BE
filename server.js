@@ -5238,6 +5238,55 @@ app.get('/api/test-paypal-connection', cors(corsOptions), async (req, res) => {
 	}
 });
 
+// Add this endpoint after the existing identity verification endpoint
+app.put('/api/admin/paypal/:walletAddress/verify-tax-id', cors(corsOptions), async (req, res) => {
+    try {
+        const { walletAddress } = req.params;
+        const { verified, rejectionReason } = req.body;
+
+        console.log(`🔍 Verifying tax ID document for wallet: ${walletAddress}`, { verified, rejectionReason });
+
+        // Find the document in the paypal collection
+        const paypalSnapshot = await db.collection('paypal')
+            .where('walletAddress', '==', walletAddress)
+            .limit(1)
+            .get();
+
+        if (paypalSnapshot.empty) {
+            return res.status(404).json({
+                error: 'Tax ID document not found for this wallet address'
+            });
+        }
+
+        const docRef = paypalSnapshot.docs[0].ref;
+        const updateData = {
+            'taxIdDocument.verified': verified,
+            'taxIdDocument.verifiedAt': verified ? new Date().toISOString() : null,
+            'taxIdDocument.rejectionReason': verified ? null : rejectionReason,
+            'taxIdDocument.rejectedAt': verified ? null : new Date().toISOString(),
+            'updatedAt': new Date().toISOString()
+        };
+
+        await docRef.update(updateData);
+
+        console.log(`✅ Tax ID document ${verified ? 'approved' : 'rejected'} for wallet: ${walletAddress}`);
+
+        res.json({
+            success: true,
+            message: verified ? 'Tax ID document approved successfully' : 'Tax ID document rejected successfully',
+            verified: verified,
+            rejectionReason: rejectionReason || null
+        });
+
+    } catch (error) {
+        console.error('❌ Error updating tax ID verification status:', error);
+        res.status(500).json({
+            error: 'Internal server error',
+            details: error.message
+        });
+    }
+});
+
 // Test PayPal payout endpoint  
 app.post('/api/test-paypal-payout', cors(corsOptions), async (req, res) => {
 	try {
