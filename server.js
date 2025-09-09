@@ -2475,7 +2475,6 @@ app.get('/api/users/wallet/:walletAddress', cors(corsOptions), async (req, res) 
 
 // Add this endpoint after your existing /api/admin/identity-documents endpoint
 
-// Enhanced admin endpoint for tax ID documents with pagination, search, and filtering
 app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
 	try {
 		const {
@@ -2489,6 +2488,18 @@ app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
 
 		console.log('🔍 Fetching tax ID documents with filters:', { page, limit, status, search, sortBy, sortOrder });
 
+		// Get all users for name and email lookup first
+		const usersSnapshot = await db.collection('users').get();
+		const userLookup = {};
+		const emailLookup = {};
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			if (userData.walletAddress) {
+				userLookup[userData.walletAddress.toLowerCase()] = userData.name || 'Anonymous';
+				emailLookup[userData.walletAddress.toLowerCase()] = userData.email || 'No email';
+			}
+		});
+
 		// Get all paypal documents with taxIdDocument
 		const allPaypalSnapshot = await db.collection('paypal').get();
 
@@ -2497,10 +2508,13 @@ app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
 		allPaypalSnapshot.forEach(doc => {
 			const data = doc.data();
 
+			// ✅ FIXED: Add the missing condition check
 			if (data.taxIdDocument && data.taxIdDocument.ipfsUrl) {
 				const document = {
 					id: doc.id,
 					walletAddress: data.walletAddress,
+					userName: userLookup[data.walletAddress?.toLowerCase()] || 'Unknown',
+					userEmail: emailLookup[data.walletAddress?.toLowerCase()] || 'No email',
 					taxIdType: data.taxIdDocument.taxIdType,
 					ipfsUrl: data.taxIdDocument.ipfsUrl,
 					uploadedAt: data.taxIdDocument.uploadedAt,
@@ -2531,12 +2545,14 @@ app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
 				filteredDocuments = allDocuments;
 		}
 
-		// Apply search filter
+		// Apply search filter - now includes user name and email search
 		if (search) {
 			const searchLower = search.toLowerCase();
 			filteredDocuments = filteredDocuments.filter(doc =>
 				doc.walletAddress.toLowerCase().includes(searchLower) ||
 				doc.taxIdType.toLowerCase().includes(searchLower) ||
+				doc.userName.toLowerCase().includes(searchLower) ||
+				doc.userEmail.toLowerCase().includes(searchLower) ||
 				(doc.rejectionReason && doc.rejectionReason.toLowerCase().includes(searchLower))
 			);
 		}
@@ -2559,15 +2575,13 @@ app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
 			}
 		});
 
-		// Apply pagination
+		// Calculate pagination
 		const totalDocuments = filteredDocuments.length;
-		const totalPages = Math.ceil(totalDocuments / parseInt(limit));
-		const startIndex = (parseInt(page) - 1) * parseInt(limit);
-		const endIndex = startIndex + parseInt(limit);
+		const totalPages = Math.ceil(totalDocuments / limit);
+		const offset = (page - 1) * limit;
+		const paginatedDocuments = filteredDocuments.slice(offset, offset + parseInt(limit));
 
-		const paginatedDocuments = filteredDocuments.slice(startIndex, endIndex);
-
-		// Calculate statistics
+		// Calculate stats
 		const stats = {
 			total: allDocuments.length,
 			pending: allDocuments.filter(doc => !doc.verified && !doc.rejectionReason).length,
@@ -2575,123 +2589,26 @@ app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
 			rejected: allDocuments.filter(doc => doc.rejectionReason && !doc.verified).length
 		};
 
-		console.log(`✅ Returning ${paginatedDocuments.length} of ${totalDocuments} tax ID documents (page ${page}/${totalPages})`);
-
 		res.json({
 			success: true,
 			documents: paginatedDocuments,
 			pagination: {
 				currentPage: parseInt(page),
-				totalPages,
-				totalDocuments,
-				hasNextPage: parseInt(page) < totalPages,
-				hasPrevPage: parseInt(page) > 1
+				totalPages: totalPages,
+				totalDocuments: totalDocuments,
+				limit: parseInt(limit),
+				hasNextPage: page < totalPages,
+				hasPrevPage: page > 1
 			},
-			stats,
-			filters: { status, search, sortBy, sortOrder }
+			stats: stats
 		});
 
 	} catch (error) {
 		console.error('❌ Error fetching tax ID documents:', error);
-		res.status(500).json({ error: 'Internal server error' });
-	}
-});
-
-// Add the tax ID verification endpoint as well
-app.put('/api/admin/paypal/:walletAddress/verify-tax-id', cors(corsOptions), async (req, res) => {
-	try {
-		const walletAddress = req.params.walletAddress;
-		const { verified, rejectionReason } = req.body;
-
-		console.log('🔧 Admin updating tax ID verification:', {
-			walletAddress,
-			verified,
-			rejectionReason
-		});
-
-		const docId = walletAddress.toLowerCase();
-		const paypalRef = db.collection('paypal').doc(docId);
-
-		const doc = await paypalRef.get();
-		if (!doc.exists) {
-			return res.status(404).json({ error: 'PayPal record not found' });
-		}
-
-		const updateData = {
-			'taxIdDocument.verified': verified,
-			'taxIdDocument.verifiedAt': new Date().toISOString(),
-			'taxIdDocument.verifiedBy': 'admin',
-			updatedAt: new Date().toISOString()
-		};
-
-		// Add rejection reason if document is rejected
-		if (!verified && rejectionReason) {
-			updateData['taxIdDocument.rejectionReason'] = rejectionReason;
-			updateData['taxIdDocument.rejectedAt'] = new Date().toISOString();
-		} else if (verified) {
-			// Clear rejection reason if approved
-			updateData['taxIdDocument.rejectionReason'] = null;
-			updateData['taxIdDocument.rejectedAt'] = null;
-		}
-
-		await paypalRef.update(updateData);
-
-		res.json({
-			success: true,
-			message: verified ? 'Tax ID document approved successfully' : 'Tax ID document rejected successfully',
-			verified: verified,
-			rejectionReason: rejectionReason || null
-		});
-
-	} catch (error) {
-		console.error('❌ Error updating tax ID verification status:', error);
 		res.status(500).json({
 			error: 'Internal server error',
 			details: error.message
 		});
-	}
-});
-
-// Get user data endpoint
-app.get('/api/users/:email', cors(corsOptions), async (req, res) => {
-	try {
-		const email = req.params.email;
-		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
-
-		const userDoc = await db.collection('users').doc(docId).get();
-
-		if (!userDoc.exists) {
-			return res.status(404).json({ error: 'User not found' });
-		}
-
-		res.json(userDoc.data());
-	} catch (error) {
-		console.error('Error fetching user:', error);
-		res.status(500).json({ error: 'Internal server error' });
-	}
-});
-
-// Get all users endpoint (for admin purposes)
-app.get('/api/users', cors(corsOptions), async (req, res) => {
-	try {
-		const usersSnapshot = await db.collection('users').get();
-		const users = [];
-
-		usersSnapshot.forEach(doc => {
-			users.push({
-				id: doc.id,
-				...doc.data()
-			});
-		});
-
-		res.json({
-			success: true,
-			count: users.length,
-			users: users
-		});
-	} catch (error) {
-		console.error('Error fetching users:', error);
-		res.status(500).json({ error: 'Internal server error' });
 	}
 });
 
@@ -3402,20 +3319,23 @@ const calculateUserPayout = async (userData) => {
 			console.log('📊 Using fallback total supply:', totalSupply);
 		}
 
-		// Get current disbursement amount
+		// Get CURRENT ACTIVE disbursement amount
 		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
-		let disbursementAmount = 0;
+		let currentDisbursementAmount = 0;
+		let currentDisbursementId = null;
 
 		if (limitsDoc.exists) {
 			const limitsData = limitsDoc.data();
-			disbursementAmount = limitsData.totalLimit || 0;
-			console.log('📊 Disbursement Amount:', disbursementAmount);
+			currentDisbursementAmount = limitsData.totalLimit || 0;
+			currentDisbursementId = limitsData.disbursementId;
+			console.log('📊 Current Active Disbursement Amount:', currentDisbursementAmount);
+			console.log('📊 Current Disbursement ID:', currentDisbursementId);
 		} else {
 			console.warn('⚠️ No disbursement amount configured');
 		}
 
-		if (disbursementAmount <= 0) {
-			console.warn('⚠️ No disbursement amount set');
+		if (currentDisbursementAmount <= 0) {
+			console.warn('⚠️ No active disbursement amount set');
 			return {
 				availableAmount: 0,
 				totalEligible: 0,
@@ -3424,60 +3344,63 @@ const calculateUserPayout = async (userData) => {
 				disbursementAmount: 0,
 				totalSupply: totalSupply,
 				userNFTsOwned: userNFTsOwned,
-				error: 'No disbursement pool configured'
+				error: 'No active disbursement pool configured'
 			};
 		}
 
-		// 🎯 MAXIMUM LIMIT EQUATION LOGIC IS HERE:
+		// Calculate share percentage and eligible amount from CURRENT disbursement
 		const sharePercentage = userNFTsOwned / totalSupply;
-		const totalEligible = disbursementAmount * sharePercentage;
-		// Note: The commented line below shows the previous *4 multiplier that was removed
-		// const totalEligible = (disbursementAmount * sharePercentage) * 4; // Multiply by 4
+		const currentDisbursementEligible = currentDisbursementAmount * sharePercentage;
 
-		// Get user's wallet address to check withdrawals
+		// Get user's withdrawal data using the helper function
 		const walletAddress = userData.walletAddress;
-		let totalWithdrawn = 0;
+		let totalWithdrawnAllTime = 0;
+		let withdrawnFromCurrentDisbursement = 0;
 
 		if (walletAddress) {
 			try {
-				const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
-				if (paypalDoc.exists) {
-					const paypalData = paypalDoc.data();
-					const successfulPayouts = paypalData.payouts || [];
+				const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
+				totalWithdrawnAllTime = withdrawalData.totalWithdrawnAllTime;
 
-					totalWithdrawn = successfulPayouts
-						.filter(payout => payout.status === 'completed' || payout.status === 'success')
-						.reduce((total, payout) => total + (payout.amount || 0), 0);
-
-					console.log('📊 Total withdrawn from PayPal records:', totalWithdrawn);
+				// Get amount withdrawn from current disbursement specifically
+				if (currentDisbursementId && withdrawalData.withdrawalsByDisbursement[currentDisbursementId]) {
+					withdrawnFromCurrentDisbursement = withdrawalData.withdrawalsByDisbursement[currentDisbursementId];
 				}
+
+				console.log('📊 Total withdrawn across all disbursements:', totalWithdrawnAllTime);
+				console.log('📊 Withdrawn from current disbursement:', withdrawnFromCurrentDisbursement);
 			} catch (error) {
 				console.error('Error fetching withdrawal history:', error);
-				totalWithdrawn = 0;
+				totalWithdrawnAllTime = 0;
+				withdrawnFromCurrentDisbursement = 0;
 			}
 		}
 
-		// Calculate available amount (eligible - withdrawn)
-		const availableAmount = Math.max(0, totalEligible - totalWithdrawn);
+		// Available amount calculation:
+		// Can withdraw from current disbursement minus what's already withdrawn from current disbursement
+		const availableAmount = Math.max(0, currentDisbursementEligible - withdrawnFromCurrentDisbursement);
 
 		console.log('📊 Final Calculation:', {
 			userNFTs: userNFTsOwned,
 			totalSupply: totalSupply,
 			sharePercentage: (sharePercentage * 100).toFixed(3) + '%',
-			disbursementAmount: disbursementAmount,
-			totalEligible: totalEligible,
-			totalWithdrawn: totalWithdrawn,
+			currentDisbursementAmount: currentDisbursementAmount,
+			currentDisbursementEligible: currentDisbursementEligible,
+			totalWithdrawnAllTime: totalWithdrawnAllTime,
+			withdrawnFromCurrentDisbursement: withdrawnFromCurrentDisbursement,
 			availableAmount: availableAmount
 		});
 
 		const result = {
 			availableAmount: Number(availableAmount.toFixed(2)),
-			totalEligible: Number(totalEligible.toFixed(2)),
-			totalWithdrawn: Number(totalWithdrawn.toFixed(2)),
+			totalEligible: Number(currentDisbursementEligible.toFixed(2)),
+			totalWithdrawn: Number(totalWithdrawnAllTime.toFixed(2)),
+			withdrawnFromCurrentDisbursement: Number(withdrawnFromCurrentDisbursement.toFixed(2)),
 			sharePercentage: Number((sharePercentage * 100).toFixed(3)),
-			disbursementAmount: Number(disbursementAmount),
+			disbursementAmount: Number(currentDisbursementAmount),
 			totalSupply: Number(totalSupply),
-			userNFTsOwned: Number(userNFTsOwned)
+			userNFTsOwned: Number(userNFTsOwned),
+			currentDisbursementId: currentDisbursementId
 		};
 
 		console.log('✅ Final calculation result:', result);
@@ -3580,51 +3503,42 @@ app.get('/api/users/:email/payout-info', cors(corsOptions), async (req, res) => 
 // Admin endpoint to update identity document verification status - NO ADMIN KEY
 app.put('/api/admin/paypal/:walletAddress/verify-identity', cors(corsOptions), async (req, res) => {
 	try {
-		const walletAddress = req.params.walletAddress;
+		const { walletAddress } = req.params;
 		const { verified, rejectionReason } = req.body;
 
-		console.log('🔧 Admin updating identity verification:', {
-			walletAddress,
-			verified,
-			rejectionReason
-		});
+		console.log(`🔍 Verifying identity document for wallet: ${walletAddress}`, { verified, rejectionReason });
 
-		const docId = walletAddress.toLowerCase();
-		const paypalRef = db.collection('paypal').doc(docId);
+		// Find the document in the paypal collection
+		const paypalSnapshot = await db.collection('paypal')
+			.where('walletAddress', '==', walletAddress)
+			.limit(1)
+			.get();
 
-		const doc = await paypalRef.get();
-		if (!doc.exists) {
-			return res.status(404).json({ error: 'PayPal record not found' });
+		if (paypalSnapshot.empty) {
+			return res.status(404).json({
+				error: 'Document not found for this wallet address'
+			});
 		}
 
+		const docRef = paypalSnapshot.docs[0].ref;
 		const updateData = {
 			'identityDocument.verified': verified,
-			'identityDocument.verifiedAt': new Date().toISOString(),
-			'identityDocument.verifiedBy': 'admin',
-			updatedAt: new Date().toISOString()
+			'identityDocument.verifiedAt': verified ? new Date().toISOString() : null,
+			'identityDocument.rejectionReason': verified ? null : rejectionReason,
+			'identityDocument.rejectedAt': verified ? null : new Date().toISOString()
 		};
 
-		// Add rejection reason if document is rejected
-		if (!verified && rejectionReason) {
-			updateData['identityDocument.rejectionReason'] = rejectionReason;
-			updateData['identityDocument.rejectedAt'] = new Date().toISOString();
-		} else if (verified) {
-			// Clear rejection reason if approved
-			updateData['identityDocument.rejectionReason'] = null;
-			updateData['identityDocument.rejectedAt'] = null;
-		}
-
-		await paypalRef.update(updateData);
+		await docRef.update(updateData);
 
 		res.json({
 			success: true,
-			message: verified ? 'Document approved successfully' : 'Document rejected successfully',
+			message: verified ? 'Identity document approved successfully' : 'Identity document rejected successfully',
 			verified: verified,
 			rejectionReason: rejectionReason || null
 		});
 
 	} catch (error) {
-		console.error('❌ Error updating verification status:', error);
+		console.error('❌ Error updating identity verification status:', error);
 		res.status(500).json({
 			error: 'Internal server error',
 			details: error.message
@@ -3632,7 +3546,6 @@ app.put('/api/admin/paypal/:walletAddress/verify-identity', cors(corsOptions), a
 	}
 });
 
-// Enhanced admin endpoint with pagination, search, and filtering
 app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => {
 	try {
 		const {
@@ -3644,7 +3557,19 @@ app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => 
 			sortOrder = 'desc'
 		} = req.query;
 
-		console.log('🔍 Fetching documents with filters:', { page, limit, status, search, sortBy, sortOrder });
+		console.log('🔍 Fetching identity documents with filters:', { page, limit, status, search, sortBy, sortOrder });
+
+		// Get all users for name lookup first
+		const usersSnapshot = await db.collection('users').get();
+		const userLookup = {};
+		const emailLookup = {};
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			if (userData.walletAddress) {
+				userLookup[userData.walletAddress.toLowerCase()] = userData.name || 'Anonymous';
+				emailLookup[userData.walletAddress.toLowerCase()] = userData.email || 'No email';
+			}
+		});
 
 		// Get all paypal documents with identityDocument
 		const allPaypalSnapshot = await db.collection('paypal').get();
@@ -3654,33 +3579,62 @@ app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => 
 		allPaypalSnapshot.forEach(doc => {
 			const data = doc.data();
 
-			// Check if identity document exists with either old or new structure
-			if (data.identityDocument && (
-				data.identityDocument.ipfsUrl || // Old structure
-				(data.identityDocument.frontImage && data.identityDocument.frontImage.ipfsUrl) // New structure
-			)) {
-				// Handle both old and new document structures
-				const frontImageUrl = data.identityDocument.frontImage?.ipfsUrl || data.identityDocument.ipfsUrl;
-				const backImageUrl = data.identityDocument.backImage?.ipfsUrl || null;
+			// ✅ FIXED: Check for correct structure in Firebase
+			if (data.identityDocument) {
+				// Handle both old and new data structures
+				let frontImageUrl = null;
+				let backImageUrl = null;
 
-				const document = {
-					id: doc.id,
-					walletAddress: data.walletAddress,
-					documentType: data.identityDocument.documentType,
-					ipfsUrl: frontImageUrl, // Use front image as primary URL
-					frontImageUrl: frontImageUrl,
-					backImageUrl: backImageUrl,
-					hasBackImage: !!backImageUrl,
-					uploadedAt: data.identityDocument.uploadedAt,
-					rejectionReason: data.identityDocument.rejectionReason || null,
-					rejectedAt: data.identityDocument.rejectedAt || null,
-					verified: data.identityDocument.verified || false,
-					verifiedAt: data.identityDocument.verifiedAt || null
-				};
+				// New structure: identityDocument.frontImage.ipfsUrl
+				if (data.identityDocument.frontImage && data.identityDocument.frontImage.ipfsUrl) {
+					frontImageUrl = data.identityDocument.frontImage.ipfsUrl;
+				}
+				// Old structure: identityDocument.frontImageUrl (fallback)
+				else if (data.identityDocument.frontImageUrl) {
+					frontImageUrl = data.identityDocument.frontImageUrl;
+				}
+				// Legacy structure: identityDocument.ipfsUrl (single image)
+				else if (data.identityDocument.ipfsUrl) {
+					frontImageUrl = data.identityDocument.ipfsUrl;
+				}
 
-				allDocuments.push(document);
+				// Back image check
+				if (data.identityDocument.backImage && data.identityDocument.backImage.ipfsUrl) {
+					backImageUrl = data.identityDocument.backImage.ipfsUrl;
+				}
+				else if (data.identityDocument.backImageUrl) {
+					backImageUrl = data.identityDocument.backImageUrl;
+				}
+
+				// Only include documents that have at least a front image
+				if (frontImageUrl) {
+					const document = {
+						id: doc.id,
+						walletAddress: data.walletAddress,
+						userName: userLookup[data.walletAddress?.toLowerCase()] || 'Unknown',
+						userEmail: emailLookup[data.walletAddress?.toLowerCase()] || 'No email',
+						documentType: data.identityDocument.documentType || 'identity_document',
+						frontImageUrl: frontImageUrl,
+						backImageUrl: backImageUrl,
+						hasBackImage: !!backImageUrl,
+						uploadedAt: data.identityDocument.uploadedAt,
+						rejectionReason: data.identityDocument.rejectionReason || null,
+						rejectedAt: data.identityDocument.rejectedAt || null,
+						verified: data.identityDocument.verified || false,
+						verifiedAt: data.identityDocument.verifiedAt || null
+					};
+
+					allDocuments.push(document);
+					console.log('✅ Found identity document for:', data.walletAddress, {
+						frontImage: !!frontImageUrl,
+						backImage: !!backImageUrl,
+						verified: document.verified
+					});
+				}
 			}
 		});
+
+		console.log(`📊 Total identity documents found: ${allDocuments.length}`);
 
 		// Apply status filter
 		let filteredDocuments = allDocuments;
@@ -3699,12 +3653,16 @@ app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => 
 				filteredDocuments = allDocuments;
 		}
 
-		// Apply search filter
+		console.log(`📊 After status filter (${status}): ${filteredDocuments.length} documents`);
+
+		// Apply search filter - includes user name search
 		if (search) {
 			const searchLower = search.toLowerCase();
 			filteredDocuments = filteredDocuments.filter(doc =>
 				doc.walletAddress.toLowerCase().includes(searchLower) ||
 				doc.documentType.toLowerCase().includes(searchLower) ||
+				doc.userName.toLowerCase().includes(searchLower) ||
+				doc.userEmail.toLowerCase().includes(searchLower) ||
 				(doc.rejectionReason && doc.rejectionReason.toLowerCase().includes(searchLower))
 			);
 		}
@@ -3727,15 +3685,13 @@ app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => 
 			}
 		});
 
-		// Apply pagination
+		// Calculate pagination
 		const totalDocuments = filteredDocuments.length;
-		const totalPages = Math.ceil(totalDocuments / parseInt(limit));
-		const startIndex = (parseInt(page) - 1) * parseInt(limit);
-		const endIndex = startIndex + parseInt(limit);
+		const totalPages = Math.ceil(totalDocuments / limit);
+		const offset = (page - 1) * limit;
+		const paginatedDocuments = filteredDocuments.slice(offset, offset + parseInt(limit));
 
-		const paginatedDocuments = filteredDocuments.slice(startIndex, endIndex);
-
-		// Calculate statistics
+		// Calculate stats
 		const stats = {
 			total: allDocuments.length,
 			pending: allDocuments.filter(doc => !doc.verified && !doc.rejectionReason).length,
@@ -3743,27 +3699,280 @@ app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => 
 			rejected: allDocuments.filter(doc => doc.rejectionReason && !doc.verified).length
 		};
 
-		console.log(`✅ Returning ${paginatedDocuments.length} of ${totalDocuments} documents (page ${page}/${totalPages})`);
+		console.log('📊 Final stats:', stats);
+		console.log('📊 Returning documents:', paginatedDocuments.length);
 
 		res.json({
 			success: true,
 			documents: paginatedDocuments,
 			pagination: {
 				currentPage: parseInt(page),
-				totalPages,
-				totalDocuments,
-				hasNextPage: parseInt(page) < totalPages,
-				hasPrevPage: parseInt(page) > 1
+				totalPages: totalPages,
+				totalDocuments: totalDocuments,
+				limit: parseInt(limit),
+				hasNextPage: page < totalPages,
+				hasPrevPage: page > 1
 			},
-			stats,
-			filters: { status, search, sortBy, sortOrder }
+			stats: stats
 		});
 
 	} catch (error) {
-		console.error('❌ Error fetching documents:', error);
-		res.status(500).json({ error: 'Internal server error' });
+		console.error('❌ Error fetching identity documents:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
 	}
 });
+
+app.post('/api/admin/search-users', cors(corsOptions), async (req, res) => {
+	try {
+		const { searchMethod, searchValue } = req.body;
+
+		if (!searchMethod || !searchValue) {
+			return res.status(400).json({
+				success: false,
+				error: 'Search method and value are required'
+			});
+		}
+
+		console.log('🔍 Admin user search:', { searchMethod, searchValue });
+
+		// Get all users from the users collection
+		const usersSnapshot = await db.collection('users').get();
+		let matchedUsers = [];
+
+		// Search through users based on method
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			const searchTerm = searchValue.toLowerCase().trim();
+
+			let isMatch = false;
+
+			switch (searchMethod) {
+				case 'wallet':
+					if (userData.walletAddress &&
+						userData.walletAddress.toLowerCase().includes(searchTerm)) {
+						isMatch = true;
+					}
+					break;
+
+				case 'name':
+					if (userData.name &&
+						userData.name.toLowerCase().includes(searchTerm)) {
+						isMatch = true;
+					}
+					break;
+
+				case 'email':
+					if (userData.email &&
+						userData.email.toLowerCase().includes(searchTerm)) {
+						isMatch = true;
+					}
+					break;
+
+				default:
+					console.warn('Unknown search method:', searchMethod);
+			}
+
+			if (isMatch) {
+				matchedUsers.push({
+					id: doc.id,
+					name: userData.name || null,
+					email: userData.email || null,
+					walletAddress: userData.walletAddress || null,
+					totalMinted: userData.totalMinted || 0,
+					nftMinted: userData.nftMinted || false,
+					createdAt: userData.createdAt || null
+				});
+			}
+		});
+
+		// Sort results by name, then by email
+		matchedUsers.sort((a, b) => {
+			const nameA = a.name || '';
+			const nameB = b.name || '';
+			if (nameA !== nameB) {
+				return nameA.localeCompare(nameB);
+			}
+			const emailA = a.email || '';
+			const emailB = b.email || '';
+			return emailA.localeCompare(emailB);
+		});
+
+		// Limit results to prevent overwhelming the UI
+		const maxResults = 50;
+		if (matchedUsers.length > maxResults) {
+			matchedUsers = matchedUsers.slice(0, maxResults);
+		}
+
+		console.log(`✅ Found ${matchedUsers.length} users matching search`);
+
+		res.json({
+			success: true,
+			users: matchedUsers,
+			totalFound: matchedUsers.length,
+			searchMethod: searchMethod,
+			searchValue: searchValue,
+			truncated: matchedUsers.length === maxResults
+		});
+
+	} catch (error) {
+		console.error('❌ Error searching users:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to search users',
+			details: error.message
+		});
+	}
+});
+
+app.post('/api/admin/search-users-advanced', cors(corsOptions), async (req, res) => {
+	try {
+		const { searchMethod, searchValue, exactMatch = false } = req.body;
+
+		if (!searchMethod || !searchValue) {
+			return res.status(400).json({
+				success: false,
+				error: 'Search method and value are required'
+			});
+		}
+
+		console.log('🔍 Advanced admin user search:', { searchMethod, searchValue, exactMatch });
+
+		// Get all users from the users collection
+		const usersSnapshot = await db.collection('users').get();
+		let matchedUsers = [];
+
+		// Helper function for fuzzy matching
+		const fuzzyMatch = (text, search) => {
+			if (!text) return false;
+			const textLower = text.toLowerCase();
+			const searchLower = search.toLowerCase();
+
+			// Exact match
+			if (textLower.includes(searchLower)) return true;
+
+			// If not exact match required, try fuzzy matching
+			if (!exactMatch) {
+				// Split search into words and check if all words are found
+				const searchWords = searchLower.split(' ').filter(word => word.length > 0);
+				return searchWords.every(word => textLower.includes(word));
+			}
+
+			return false;
+		};
+
+		// Search through users based on method
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			const searchTerm = searchValue.trim();
+
+			let isMatch = false;
+			let matchScore = 0;
+
+			switch (searchMethod) {
+				case 'wallet':
+					if (userData.walletAddress) {
+						if (exactMatch) {
+							isMatch = userData.walletAddress.toLowerCase() === searchTerm.toLowerCase();
+							matchScore = isMatch ? 100 : 0;
+						} else {
+							isMatch = userData.walletAddress.toLowerCase().includes(searchTerm.toLowerCase());
+							matchScore = isMatch ?
+								(userData.walletAddress.toLowerCase().startsWith(searchTerm.toLowerCase()) ? 90 : 70) : 0;
+						}
+					}
+					break;
+
+				case 'name':
+					if (userData.name) {
+						isMatch = fuzzyMatch(userData.name, searchTerm);
+						if (isMatch) {
+							// Higher score for exact matches
+							if (userData.name.toLowerCase() === searchTerm.toLowerCase()) {
+								matchScore = 100;
+							} else if (userData.name.toLowerCase().startsWith(searchTerm.toLowerCase())) {
+								matchScore = 90;
+							} else {
+								matchScore = 70;
+							}
+						}
+					}
+					break;
+
+				case 'email':
+					if (userData.email) {
+						isMatch = fuzzyMatch(userData.email, searchTerm);
+						if (isMatch) {
+							// Higher score for exact matches
+							if (userData.email.toLowerCase() === searchTerm.toLowerCase()) {
+								matchScore = 100;
+							} else if (userData.email.toLowerCase().startsWith(searchTerm.toLowerCase())) {
+								matchScore = 90;
+							} else {
+								matchScore = 70;
+							}
+						}
+					}
+					break;
+
+				default:
+					console.warn('Unknown search method:', searchMethod);
+			}
+
+			if (isMatch) {
+				matchedUsers.push({
+					id: doc.id,
+					name: userData.name || null,
+					email: userData.email || null,
+					walletAddress: userData.walletAddress || null,
+					totalMinted: userData.totalMinted || 0,
+					nftMinted: userData.nftMinted || false,
+					createdAt: userData.createdAt || null,
+					matchScore: matchScore
+				});
+			}
+		});
+
+		// Sort by match score (highest first), then by name
+		matchedUsers.sort((a, b) => {
+			if (b.matchScore !== a.matchScore) {
+				return b.matchScore - a.matchScore;
+			}
+			const nameA = a.name || '';
+			const nameB = b.name || '';
+			return nameA.localeCompare(nameB);
+		});
+
+		// Limit results to prevent overwhelming the UI
+		const maxResults = 50;
+		if (matchedUsers.length > maxResults) {
+			matchedUsers = matchedUsers.slice(0, maxResults);
+		}
+
+		console.log(`✅ Found ${matchedUsers.length} users matching advanced search`);
+
+		res.json({
+			success: true,
+			users: matchedUsers,
+			totalFound: matchedUsers.length,
+			searchMethod: searchMethod,
+			searchValue: searchValue,
+			exactMatch: exactMatch,
+			truncated: matchedUsers.length === maxResults
+		});
+
+	} catch (error) {
+		console.error('❌ Error in advanced user search:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to search users',
+			details: error.message
+		});
+	}
+});
+
 
 app.put('/api/paypal/:walletAddress/email', cors(corsOptions), async (req, res) => {
 	try {
@@ -3856,11 +4065,10 @@ app.get('/api/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
 	}
 });
 
-// REPLACE: Your existing /api/paypal/:walletAddress/request-payout endpoint
 app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (req, res) => {
 	try {
 		const walletAddress = req.params.walletAddress;
-		const { amount: requestedAmount } = req.body;  // Get the user-requested amount
+		const { amount: requestedAmount } = req.body;
 
 		console.log('🔧 Processing payout request for wallet:', walletAddress);
 		console.log('💰 Requested amount from user:', requestedAmount);
@@ -3902,19 +4110,6 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			});
 		}
 
-		// Daily withdrawal limit
-		/*const today = new Date().toDateString();
-		const todayPayouts = existingPayouts.filter(payout => {
-			const payoutDate = new Date(payout.requestedAt).toDateString();
-			return payoutDate === today && payout.status !== 'failed';
-		});
-
-		if (todayPayouts.length > 0) {
-			return res.status(400).json({
-				error: 'Daily withdrawal limit reached. One withdrawal per day allowed.'
-			});
-		}*/
-
 		// Get user data and calculate available payout
 		const userSnapshot = await db.collection('users')
 			.where('walletAddress', '==', walletAddress)
@@ -3934,8 +4129,6 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		}
 
 		const availableAmount = Number(payoutCalculation.availableAmount) || 0;
-
-		// IMPORTANT: Use requested amount if provided, otherwise use available amount
 		const withdrawAmount = requestedAmount ? parseFloat(requestedAmount) : availableAmount;
 
 		console.log('📊 Available amount:', availableAmount.toFixed(2));
@@ -3954,11 +4147,11 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			});
 		}
 
-		// Check the $0.03 minimum balance rule
+		// Check the remaining balance rule
 		const remainingAfterWithdrawal = availableAmount - withdrawAmount;
-		if (remainingAfterWithdrawal > 0 && remainingAfterWithdrawal < 0.03) {
+		if (remainingAfterWithdrawal > 0 && remainingAfterWithdrawal < 1.00) {
 			return res.status(400).json({
-				error: `Withdrawal would leave $${remainingAfterWithdrawal.toFixed(2)}. Please withdraw the full amount or leave at least $0.03`
+				error: `Withdrawal would leave $${remainingAfterWithdrawal.toFixed(2)}. Please withdraw the full amount or leave at least $1.00`
 			});
 		}
 
@@ -3978,6 +4171,9 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 				error: `Insufficient funds in disbursement pool. Available in pool: $${remainingInPool.toFixed(2)}`
 			});
 		}
+
+		// Get current disbursement ID for tracking
+		const currentDisbursementId = limitsData.disbursementId || `disbursement_${Date.now()}`;
 
 		// Create PayPal payout
 		console.log('Processing PayPal payout...');
@@ -4006,18 +4202,20 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 
 		const response = await paypalClient.execute(payoutRequest);
 
-		// Update disbursement pool usage with the actual withdrawn amount
+		// Update disbursement pool usage
 		const newUsedAmount = (limitsData.usedAmount || 0) + withdrawAmount;
 		await db.collection('admin_settings').doc('payout_limits').update({
 			usedAmount: newUsedAmount,
-			lastUpdated: new Date().toISOString()
+			lastUpdated: new Date().toISOString(),
+			// Ensure disbursementId exists for tracking
+			...((!limitsData.disbursementId) && { disbursementId: currentDisbursementId })
 		});
 
-		// Record the payout with the actual withdrawn amount
+		// Record the payout with disbursement tracking
 		const payoutData = {
 			id: payoutId,
 			amount: withdrawAmount,
-			status: 'pending', // Always start as pending
+			status: 'pending',
 			paypalBatchId: response.result.batch_header.payout_batch_id,
 			paypalStatus: response.result.batch_header.batch_status,
 			requestedAt: new Date().toISOString(),
@@ -4029,7 +4227,8 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			sharePercentage: payoutCalculation.sharePercentage,
 			disbursementAmount: payoutCalculation.disbursementAmount,
 			availableAtTimeOfWithdrawal: availableAmount,
-			amountWithdrawn: withdrawAmount
+			amountWithdrawn: withdrawAmount,
+			disbursementId: currentDisbursementId // Add disbursement tracking
 		};
 
 		await paypalRef.update({
@@ -4042,7 +4241,6 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		console.log('💸 Amount requested:', withdrawAmount.toFixed(2));
 		console.log('💰 Remaining available:', remainingAfterWithdrawal.toFixed(2));
 
-		// 🎯 NEVER SHOW SUCCESS IMMEDIATELY - ALL PAYOUTS ARE PENDING INITIALLY
 		res.json({
 			success: false, // Always false initially
 			message: `Withdrawal request of $${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
@@ -4054,6 +4252,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			estimatedArrival: '1-3 business days',
 			status: 'pending',
 			paypalStatus: response.result.batch_header.batch_status,
+			disbursementId: currentDisbursementId,
 			note: 'Your withdrawal is being processed. Check back later for status updates.'
 		});
 
@@ -5154,10 +5353,9 @@ app.get('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
 	}
 });
 
-// Update your existing POST endpoint for payout limits
 app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async (req, res) => {
 	try {
-		const { totalLimit, period, projectName, comments } = req.body; // ADD projectName here
+		const { totalLimit, fromDate, toDate, projectName, comments } = req.body;
 
 		// Validation
 		if (!totalLimit || totalLimit <= 0) {
@@ -5168,32 +5366,71 @@ app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async
 			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
 		}
 
+		// Validate dates if provided
+		if (fromDate && toDate) {
+			const from = new Date(fromDate);
+			const to = new Date(toDate);
+
+			if (from >= to) {
+				return res.status(400).json({ error: 'From date must be before To date' });
+			}
+		}
+
 		const now = new Date();
+		const disbursementId = `disbursement_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
 		// Get current data for audit log
 		const currentDoc = await db.collection('admin_settings').doc('payout_limits').get();
 		const oldLimit = currentDoc.exists ? currentDoc.data().totalLimit : null;
 
-		// Set the new payout limit
+		// Mark previous disbursement as inactive
+		if (currentDoc.exists) {
+			const oldDisbursementId = currentDoc.data().disbursementId;
+			if (oldDisbursementId) {
+				try {
+					const historyQuery = await db.collection('disbursement_history')
+						.where('disbursementId', '==', oldDisbursementId)
+						.get();
+
+					const batch = db.batch();
+					historyQuery.docs.forEach(doc => {
+						batch.update(doc.ref, { isActive: false });
+					});
+					await batch.commit();
+				} catch (historyError) {
+					console.error('Error updating previous disbursement history:', historyError);
+				}
+			}
+		}
+
+		// Set the new payout limit with disbursement ID
 		await db.collection('admin_settings').doc('payout_limits').set({
 			totalLimit: parseFloat(totalLimit),
 			usedAmount: 0, // Reset used amount when setting new limit
 			lastReset: now,
 			updatedAt: now,
-			updatedBy: 'admin'
+			updatedBy: 'admin',
+			disbursementId: disbursementId, // Track this disbursement
+			fromDate: fromDate || null,
+			toDate: toDate || null,
+			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+			projectName: projectName || null
 		});
 
 		// Record this disbursement in history
 		await db.collection('disbursement_history').add({
+			disbursementId: disbursementId,
 			totalLimit: parseFloat(totalLimit),
-			period: period || 'Not specified',
-			projectName: projectName || null, // ADD this
+			fromDate: fromDate || null,
+			toDate: toDate || null,
+			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+			projectName: projectName || null,
 			comments: comments || null,
 			usedAmount: 0,
 			isActive: true,
 			createdAt: now.toISOString(),
 			createdBy: 'admin',
-			disbursementId: `disbursement_${Date.now()}`
+			startDate: now.toISOString()
 		});
 
 		// Log the change for audit trail
@@ -5201,22 +5438,64 @@ app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async
 			action: 'payout_limit_updated',
 			oldLimit: oldLimit,
 			newLimit: parseFloat(totalLimit),
-			period: period,
-			projectName: projectName, // ADD this
+			oldDisbursementId: currentDoc.exists ? currentDoc.data().disbursementId : null,
+			newDisbursementId: disbursementId,
+			fromDate: fromDate,
+			toDate: toDate,
+			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+			projectName: projectName,
 			timestamp: now,
 			adminId: 'admin',
 			ip: req.ip
 		});
 
+		console.log(`✅ New disbursement created: ${disbursementId} with limit $${totalLimit}`);
+
 		res.json({
 			success: true,
-			message: 'Payout limit updated successfully',
+			message: 'New disbursement created successfully',
+			disbursementId: disbursementId,
 			totalLimit: parseFloat(totalLimit),
 			remainingLimit: parseFloat(totalLimit)
 		});
 	} catch (error) {
 		console.error('Error setting payout limits:', error);
 		res.status(500).json({ error: 'Failed to set payout limits' });
+	}
+});
+
+app.get('/api/admin/user-withdrawal-breakdown/:walletAddress', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
+
+		// Get disbursement history for context
+		const disbursementHistory = await db.collection('disbursement_history')
+			.orderBy('createdAt', 'desc')
+			.get();
+
+		const disbursements = [];
+		disbursementHistory.forEach(doc => {
+			disbursements.push({
+				id: doc.id,
+				disbursementId: doc.data().disbursementId,
+				totalLimit: doc.data().totalLimit,
+				period: doc.data().period,
+				isActive: doc.data().isActive,
+				createdAt: doc.data().createdAt
+			});
+		});
+
+		res.json({
+			success: true,
+			walletAddress: walletAddress,
+			withdrawalData: withdrawalData,
+			disbursementHistory: disbursements
+		});
+
+	} catch (error) {
+		console.error('Error getting withdrawal breakdown:', error);
+		res.status(500).json({ error: 'Failed to get withdrawal breakdown' });
 	}
 });
 
