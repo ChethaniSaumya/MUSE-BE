@@ -1544,7 +1544,7 @@ app.use((req, res, next) => {
 app.use('/images', express.static(path.join(__dirname, 'generated_images')));
 
 var corsOptions = {
-	origin: ['https://adminpanel.musecoinx.com', 'https://artistdapp.vercal.app', 'https://www.musecoinx.com/', 'http://localhost:3000', 'https://hopecoinkk.musecoinx.com', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:3002'],
+	origin: ['https://adminpanel.musecoinx.com', 'https://artistdapp-1.onrender.com', 'https://www.musecoinx.com/', 'http://localhost:3000', 'https://hopecoinkk.musecoinx.com', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:3002'],
 	optionsSuccessStatus: 200,
 	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 	allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
