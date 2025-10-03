@@ -17,6 +17,7 @@ const paypal = require('@paypal/checkout-server-sdk');
 const payoutsSDK = require('@paypal/payouts-sdk')
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
+const sharp = require('sharp');
 
 const Environment = process.env.NODE_ENV === 'production'
 	? paypal.core.LiveEnvironment
@@ -62,6 +63,47 @@ try {
 	console.error('❌ Failed to create email transporter:', error);
 	process.exit(1);
 }
+
+const compressImage = async (imageBuffer, maxWidth = 1200, quality = 80) => {
+	try {
+		console.log('🖼️ Compressing image...');
+
+		const image = sharp(imageBuffer);
+		const metadata = await image.metadata();
+
+		let width = metadata.width;
+		let height = metadata.height;
+
+		// Resize if necessary
+		if (width > maxWidth) {
+			height = Math.round((height / width) * maxWidth);
+			width = maxWidth;
+		}
+
+		// Compress image
+		const compressedBuffer = await image
+			.resize(width, height, {
+				fit: 'inside',
+				withoutEnlargement: true
+			})
+			.jpeg({
+				quality,
+				progressive: true,
+				mozjpeg: true
+			})
+			.toBuffer();
+
+		const originalSize = (imageBuffer.length / 1024 / 1024).toFixed(2);
+		const compressedSize = (compressedBuffer.length / 1024 / 1024).toFixed(2);
+
+		console.log(`✅ Image compressed: ${originalSize}MB → ${compressedSize}MB`);
+
+		return compressedBuffer;
+	} catch (error) {
+		console.error('❌ Image compression failed:', error);
+		throw error;
+	}
+};
 
 const contractABI = [
 	{
@@ -1502,7 +1544,7 @@ app.use((req, res, next) => {
 app.use('/images', express.static(path.join(__dirname, 'generated_images')));
 
 var corsOptions = {
-	origin: ['https://adminpanel.musecoinx.com', 'http://localhost:3000', 'https://hopecoinkk.musecoinx.com'],
+	origin: ['https://adminpanel.musecoinx.com', 'https://artistdapp.vercal.app', 'https://www.musecoinx.com/', 'http://localhost:3000', 'https://hopecoinkk.musecoinx.com', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:3002'],
 	optionsSuccessStatus: 200,
 	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
 	allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
@@ -1733,55 +1775,75 @@ const sendMintSuccessEmail = async (userEmail, userName, tokenId, certificateUrl
 	}
 };
 
+const uploadToIPFS = async (filePath, fileName, maxRetries = 5) => {
+	for (let attempt = 1; attempt <= maxRetries; attempt++) {
+		try {
+			console.log(`📤 Uploading attempt ${attempt} to IPFS...`);
 
-// Function to upload file to IPFS via Pinata
-const uploadToIPFS = async (filePath, fileName) => {
-	try {
-		if (!PINATA_JWT) {
-			throw new Error('PINATA_JWT environment variable is not set');
+			if (!PINATA_JWT) {
+				throw new Error('PINATA_JWT environment variable is not set');
+			}
+
+			const formData = new FormData();
+			const fileStream = fs.createReadStream(filePath);
+
+			formData.append('file', fileStream);
+
+			// Add metadata
+			const metadata = JSON.stringify({
+				name: fileName,
+				keyvalues: {
+					type: 'artist-project-image',
+					uploaded: new Date().toISOString()
+				}
+			});
+			formData.append('pinataMetadata', metadata);
+
+			// Add options
+			const options = JSON.stringify({
+				cidVersion: 1,
+			});
+			formData.append('pinataOptions', options);
+
+			// Create a custom axios instance with longer timeout
+			const axiosInstance = axios.create({
+				timeout: 30000, // 30 seconds timeout
+				timeoutErrorMessage: 'IPFS upload timeout'
+			});
+
+			const response = await axiosInstance.post(PINATA_API_URL, formData, {
+				maxBodyLength: Infinity,
+				maxContentLength: Infinity,
+				headers: {
+					'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
+					'Authorization': `Bearer ${PINATA_JWT}`
+				}
+			});
+
+			console.log('✅ File uploaded to IPFS:', response.data);
+
+			// Return the IPFS URL
+			return {
+				ipfsHash: response.data.IpfsHash,
+				ipfsUrl: `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`,
+				pinataUrl: `https://pinata.cloud/ipfs/${response.data.IpfsHash}`
+			};
+
+		} catch (error) {
+			console.error(`❌ IPFS upload error (attempt ${attempt}):`, error.message);
+
+			if (attempt === maxRetries) {
+				throw new Error(`IPFS upload failed after ${maxRetries} attempts: ${error.message}`);
+			}
+
+			// Exponential backoff for retries
+			const delayMs = Math.pow(2, attempt) * 1000;
+			console.log(`⏳ Retrying in ${delayMs / 1000} seconds...`);
+			await new Promise(resolve => setTimeout(resolve, delayMs));
 		}
-
-		const formData = new FormData();
-		formData.append('file', fs.createReadStream(filePath));
-
-		// Add metadata
-		const metadata = JSON.stringify({
-			name: fileName,
-			keyvalues: {
-				type: 'ownership-certificate',
-				generated: new Date().toISOString()
-			}
-		});
-		formData.append('pinataMetadata', metadata);
-
-		// Add options
-		const options = JSON.stringify({
-			cidVersion: 1,
-		});
-		formData.append('pinataOptions', options);
-
-		const response = await axios.post(PINATA_API_URL, formData, {
-			maxBodyLength: 'Infinity',
-			headers: {
-				'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
-				'Authorization': `Bearer ${PINATA_JWT}`
-			}
-		});
-
-		console.log('File uploaded to IPFS:', response.data);
-
-		// Return the IPFS URL
-		return {
-			ipfsHash: response.data.IpfsHash,
-			ipfsUrl: `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`,
-			pinataUrl: `https://pinata.cloud/ipfs/${response.data.IpfsHash}`
-		};
-
-	} catch (error) {
-		console.error('Error uploading to Pinata:', error.response?.data || error.message);
-		throw error;
 	}
 };
+
 
 // Function to generate personalized ownership card
 const generateOwnershipCard = async (userName, tokenId, outputPath) => {
@@ -2132,17 +2194,6 @@ app.post('/api/admin/payout-limits/reset', cors(corsOptions), authenticateAdmin,
 		res.status(500).json({ error: 'Failed to reset payout limits' });
 	}
 });
-
-
-
-
-
-
-
-
-
-
-
 
 app.post('/api/users', cors(corsOptions), async (req, res) => {
 	try {
@@ -4830,62 +4881,77 @@ app.get('/api/paypal/:walletAddress/tax-id-status', cors(corsOptions), async (re
 		res.status(500).json({ error: 'Internal server error' });
 	}
 });
-// Add this function after your existing uploadToIPFS function
+
+const retryRequest = async (fn, maxRetries = 3, baseDelay = 2000) => {
+	for (let i = 0; i < maxRetries; i++) {
+		try {
+			return await fn();
+		} catch (error) {
+			if (i === maxRetries - 1) {
+				console.error(`❌ All ${maxRetries} upload attempts failed`);
+				throw error;
+			}
+
+			const delay = baseDelay * Math.pow(2, i); // Exponential backoff
+			console.log(`⏳ Upload attempt ${i + 1} failed, retrying in ${delay}ms...`);
+			await new Promise(resolve => setTimeout(resolve, delay));
+		}
+	}
+};
 
 const uploadToIPFSFromBuffer = async (buffer, fileName) => {
 	try {
-		if (!PINATA_JWT) {
-			throw new Error('PINATA_JWT environment variable is not set');
+		// Validate buffer size (10MB max)
+		if (buffer.length > 10 * 1024 * 1024) {
+			throw new Error('Image size exceeds 10MB limit');
 		}
 
 		const formData = new FormData();
+		formData.append('file', buffer, fileName);
 
-		// Create a readable stream from buffer
-		const Readable = require('stream').Readable;
-		const stream = new Readable();
-		stream.push(buffer);
-		stream.push(null);
-
-		formData.append('file', stream, {
-			filename: fileName,
-			contentType: 'image/jpeg'
-		});
-
-		// Add metadata
-		const metadata = JSON.stringify({
-			name: fileName,
-			keyvalues: {
-				type: 'identity-document',
-				generated: new Date().toISOString()
-			}
-		});
-		formData.append('pinataMetadata', metadata);
-
-		// Add options
-		const options = JSON.stringify({
-			cidVersion: 1,
-		});
-		formData.append('pinataOptions', options);
-
-		const response = await axios.post(PINATA_API_URL, formData, {
-			maxBodyLength: 'Infinity',
+		const config = {
+			method: 'post',
+			url: 'https://api.pinata.cloud/pinning/pinFileToIPFS',
+			data: formData,
 			headers: {
-				'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
-				'Authorization': `Bearer ${PINATA_JWT}`
+				'Authorization': `Bearer ${process.env.PINATA_JWT}`,
+				...formData.getHeaders()
+			},
+			timeout: 60000, // Increased to 60 seconds for large images
+			maxContentLength: 15 * 1024 * 1024, // 15MB
+			maxBodyLength: 15 * 1024 * 1024,
+			// Add axios retry configuration
+			'axios-retry': {
+				retries: 3,
+				retryDelay: (retryCount) => {
+					return retryCount * 2000; // 2s, 4s, 6s delays
+				}
 			}
-		});
+		};
 
-		console.log('Buffer uploaded to IPFS:', response.data);
+		console.log(`📤 Uploading ${(buffer.length / 1024 / 1024).toFixed(2)}MB to IPFS...`);
+
+		const response = await axios(config);
+
+		console.log('✅ IPFS upload successful:', response.data.IpfsHash);
 
 		return {
 			ipfsHash: response.data.IpfsHash,
-			ipfsUrl: `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`,
-			pinataUrl: `https://pinata.cloud/ipfs/${response.data.IpfsHash}`
+			ipfsUrl: `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`
 		};
-
 	} catch (error) {
-		console.error('Error uploading buffer to Pinata:', error.response?.data || error.message);
-		throw error;
+		console.error('❌ IPFS upload error:', error.message);
+
+		if (error.code === 'ECONNABORTED') {
+			throw new Error('IPFS upload timeout. Please try with a smaller image.');
+		}
+
+		if (error.response) {
+			// Pinata API error
+			throw new Error(`IPFS upload failed: ${error.response.data?.error || error.message}`);
+		}
+
+		throw new Error(`IPFS upload failed: ${error.message}`);
 	}
 };
 
@@ -5240,51 +5306,51 @@ app.get('/api/test-paypal-connection', cors(corsOptions), async (req, res) => {
 
 // Add this endpoint after the existing identity verification endpoint
 app.put('/api/admin/paypal/:walletAddress/verify-tax-id', cors(corsOptions), async (req, res) => {
-    try {
-        const { walletAddress } = req.params;
-        const { verified, rejectionReason } = req.body;
+	try {
+		const { walletAddress } = req.params;
+		const { verified, rejectionReason } = req.body;
 
-        console.log(`🔍 Verifying tax ID document for wallet: ${walletAddress}`, { verified, rejectionReason });
+		console.log(`🔍 Verifying tax ID document for wallet: ${walletAddress}`, { verified, rejectionReason });
 
-        // Find the document in the paypal collection
-        const paypalSnapshot = await db.collection('paypal')
-            .where('walletAddress', '==', walletAddress)
-            .limit(1)
-            .get();
+		// Find the document in the paypal collection
+		const paypalSnapshot = await db.collection('paypal')
+			.where('walletAddress', '==', walletAddress)
+			.limit(1)
+			.get();
 
-        if (paypalSnapshot.empty) {
-            return res.status(404).json({
-                error: 'Tax ID document not found for this wallet address'
-            });
-        }
+		if (paypalSnapshot.empty) {
+			return res.status(404).json({
+				error: 'Tax ID document not found for this wallet address'
+			});
+		}
 
-        const docRef = paypalSnapshot.docs[0].ref;
-        const updateData = {
-            'taxIdDocument.verified': verified,
-            'taxIdDocument.verifiedAt': verified ? new Date().toISOString() : null,
-            'taxIdDocument.rejectionReason': verified ? null : rejectionReason,
-            'taxIdDocument.rejectedAt': verified ? null : new Date().toISOString(),
-            'updatedAt': new Date().toISOString()
-        };
+		const docRef = paypalSnapshot.docs[0].ref;
+		const updateData = {
+			'taxIdDocument.verified': verified,
+			'taxIdDocument.verifiedAt': verified ? new Date().toISOString() : null,
+			'taxIdDocument.rejectionReason': verified ? null : rejectionReason,
+			'taxIdDocument.rejectedAt': verified ? null : new Date().toISOString(),
+			'updatedAt': new Date().toISOString()
+		};
 
-        await docRef.update(updateData);
+		await docRef.update(updateData);
 
-        console.log(`✅ Tax ID document ${verified ? 'approved' : 'rejected'} for wallet: ${walletAddress}`);
+		console.log(`✅ Tax ID document ${verified ? 'approved' : 'rejected'} for wallet: ${walletAddress}`);
 
-        res.json({
-            success: true,
-            message: verified ? 'Tax ID document approved successfully' : 'Tax ID document rejected successfully',
-            verified: verified,
-            rejectionReason: rejectionReason || null
-        });
+		res.json({
+			success: true,
+			message: verified ? 'Tax ID document approved successfully' : 'Tax ID document rejected successfully',
+			verified: verified,
+			rejectionReason: rejectionReason || null
+		});
 
-    } catch (error) {
-        console.error('❌ Error updating tax ID verification status:', error);
-        res.status(500).json({
-            error: 'Internal server error',
-            details: error.message
-        });
-    }
+	} catch (error) {
+		console.error('❌ Error updating tax ID verification status:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
 });
 
 // Test PayPal payout endpoint  
@@ -5705,6 +5771,660 @@ app.get('/api/admin/disbursement-history', cors(corsOptions), authenticateAdmin,
 		});
 	}
 });
+
+
+/*ARTIST DAPP SERVER STARTS*/
+
+app.post('/api/artists/register', cors(corsOptions), async (req, res) => {
+	try {
+		const { name, email, mobile, password } = req.body;
+
+		// Enhanced validation
+		if (!name || !email || !mobile || !password) {
+			return res.status(400).json({
+				error: 'All fields are required',
+				missingFields: {
+					name: !name,
+					email: !email,
+					mobile: !mobile,
+					password: !password
+				}
+			});
+		}
+
+		// Validate name length
+		if (name.length > 15) {
+			return res.status(400).json({
+				error: 'Name must be 15 characters or less'
+			});
+		}
+
+		if (name.length < 2) {
+			return res.status(400).json({
+				error: 'Name must be at least 2 characters'
+			});
+		}
+
+		// Validate email format
+		const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+		if (!emailRegex.test(email)) {
+			return res.status(400).json({
+				error: 'Please enter a valid email address (e.g., user@gmail.com)'
+			});
+		}
+
+		// Validate password length
+		if (password.length < 6) {
+			return res.status(400).json({
+				error: 'Password must be at least 6 characters long'
+			});
+		}
+
+		// Validate mobile number
+		if (!mobile || mobile.length < 10) {
+			return res.status(400).json({
+				error: 'Please enter a valid mobile number'
+			});
+		}
+
+		console.log('🔍 Artist registration attempt:', {
+			name: name.trim(),
+			email: email.toLowerCase().trim(),
+			mobile: mobile
+		});
+
+		// Check if artist already exists
+		const existingArtist = await db.collection('artists')
+			.where('email', '==', email.toLowerCase().trim())
+			.limit(1)
+			.get();
+
+		if (!existingArtist.empty) {
+			console.log('❌ Artist already exists:', email);
+			return res.status(409).json({
+				error: 'An account with this email already exists. Please try logging in instead.'
+			});
+		}
+
+		// Create artist data - INCLUDING NAME
+		const artistData = {
+			name: name.trim(), // ✅ FIXED: Added name field
+			email: email.toLowerCase().trim(),
+			mobile: mobile.trim(),
+			password: password, // Note: In production, hash this password
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		};
+
+		console.log('💾 Saving artist data:', artistData);
+
+		// Save to Firebase
+		const docRef = await db.collection('artists').add(artistData);
+
+		console.log('✅ Artist registered successfully:', {
+			id: docRef.id,
+			name: artistData.name,
+			email: artistData.email
+		});
+
+		res.status(201).json({
+			success: true,
+			message: 'Artist registered successfully! You can now log in.',
+			artistId: docRef.id,
+			name: artistData.name
+		});
+
+	} catch (error) {
+		console.error('❌ Error registering artist:', error);
+		res.status(500).json({
+			error: 'Registration failed. Please try again.',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+app.post('/api/artists/login', cors(corsOptions), async (req, res) => {
+	try {
+		const { email, password } = req.body;
+
+		if (!email || !password) {
+			return res.status(400).json({
+				error: 'Email and password are required'
+			});
+		}
+
+		// Validate email format
+		const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+		if (!emailRegex.test(email)) {
+			return res.status(400).json({
+				error: 'Please enter a valid email address'
+			});
+		}
+
+		console.log('🔍 Login attempt for:', email.toLowerCase().trim());
+
+		// Find artist - search by email and password
+		const artistQuery = await db.collection('artists')
+			.where('email', '==', email.toLowerCase().trim())
+			.where('password', '==', password)
+			.limit(1)
+			.get();
+
+		if (artistQuery.empty) {
+			console.log('❌ Login failed - invalid credentials for:', email);
+			return res.status(401).json({
+				error: 'Invalid email or password. Please check your credentials and try again.'
+			});
+		}
+
+		const artistDoc = artistQuery.docs[0];
+		const artistData = artistDoc.data();
+
+		// Update last login time
+		await artistDoc.ref.update({
+			lastLoginAt: new Date().toISOString()
+		});
+
+		console.log('✅ Login successful for:', {
+			id: artistDoc.id,
+			name: artistData.name,
+			email: artistData.email
+		});
+
+		// Return artist data - INCLUDING NAME
+		res.json({
+			success: true,
+			message: 'Login successful',
+			artist: {
+				id: artistDoc.id,
+				name: artistData.name || 'Artist', // ✅ FIXED: Include name field
+				email: artistData.email,
+				mobile: artistData.mobile,
+				createdAt: artistData.createdAt,
+				lastLoginAt: new Date().toISOString()
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error during login:', error);
+		res.status(500).json({
+			error: 'Login failed. Please try again.',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+app.post('/api/artists/create-project', cors(corsOptions), async (req, res) => {
+	let tempImagePath = null;
+
+	try {
+		const { artistId, projectName, projectSymbol, totalSupply, mintPrice, image } = req.body;
+
+		console.log('🎨 Creating project for artist:', artistId);
+		console.log('📊 Project details:', {
+			projectName,
+			projectSymbol,
+			totalSupply,
+			mintPrice,
+			hasImage: !!image
+		});
+		// Enhanced validation with specific error messages
+		const missingFields = {};
+		if (!artistId) missingFields.artistId = true;
+		if (!projectName || !projectName.trim()) missingFields.projectName = true;
+		if (!projectSymbol || !projectSymbol.trim()) missingFields.projectSymbol = true;
+		if (!totalSupply) missingFields.totalSupply = true;
+		if (mintPrice === undefined || mintPrice === null || mintPrice === '') missingFields.mintPrice = true;
+		if (!image) missingFields.image = true;
+
+		if (Object.keys(missingFields).length > 0) {
+			return res.status(400).json({
+				error: 'All fields are required',
+				missingFields: missingFields
+			});
+		}
+
+		// Validate project name
+		if (projectName.trim().length < 2) {
+			return res.status(400).json({
+				error: 'Project name must be at least 2 characters long'
+			});
+		}
+
+		if (projectName.trim().length > 50) {
+			return res.status(400).json({
+				error: 'Project name must be 50 characters or less'
+			});
+		}
+
+		// Validate project symbol
+		if (projectSymbol.trim().length < 1) {
+			return res.status(400).json({
+				error: 'Project symbol is required'
+			});
+		}
+
+		if (projectSymbol.trim().length > 10) {
+			return res.status(400).json({
+				error: 'Project symbol must be 10 characters or less'
+			});
+		}
+
+		// Validate total supply
+		const supply = parseInt(totalSupply);
+		if (isNaN(supply) || supply < 1) {
+			return res.status(400).json({
+				error: 'Total supply must be at least 1'
+			});
+		}
+
+		if (supply > 1000000) {
+			return res.status(400).json({
+				error: 'Total supply cannot exceed 1,000,000'
+			});
+		}
+
+		// Validate mint price
+		const price = parseFloat(mintPrice);
+		if (isNaN(price) || price < 0) {
+			return res.status(400).json({
+				error: 'Mint price cannot be negative'
+			});
+		}
+
+		if (price > 10000) {
+			return res.status(400).json({
+				error: 'Mint price cannot exceed $10,000'
+			});
+		}
+
+		const artistDoc = await db.collection('artists').doc(artistId).get();
+		if (!artistDoc.exists) {
+			console.log('❌ Artist not found:', artistId);
+			return res.status(404).json({
+				error: 'Artist account not found. Please log in again.'
+			});
+		}
+
+		const artistData = artistDoc.data();
+		console.log('✅ Artist found:', {
+			name: artistData.name,
+			email: artistData.email
+		});
+
+		// Check for duplicate project symbol
+		const existingProject = await db.collection('artist_projects')
+			.where('projectSymbol', '==', projectSymbol.trim().toUpperCase())
+			.limit(1)
+			.get();
+
+		if (!existingProject.empty) {
+			console.log('❌ Duplicate project symbol:', projectSymbol);
+			return res.status(409).json({
+				error: `Project symbol "${projectSymbol.trim().toUpperCase()}" already exists. Please choose a different symbol.`
+			});
+		}
+
+		// Process and upload image to IPFS
+		let imageIpfsData = null;
+		if (image) {
+			try {
+				console.log('📸 Processing project image...');
+
+				// Remove data URL prefix if present
+				const base64Data = image.replace(/^data:image\/[a-z]+;base64,/, '');
+				let imageBuffer = Buffer.from(base64Data, 'base64');
+
+				// Validate image size (10MB limit)
+				if (imageBuffer.length > 10 * 1024 * 1024) {
+					return res.status(400).json({
+						error: 'Image size must be less than 10MB'
+					});
+				}
+
+				// Compress image if it's larger than 1MB
+				if (imageBuffer.length > 1 * 1024 * 1024) {
+					console.log('🔄 Compressing large image...');
+					imageBuffer = await compressImage(imageBuffer);
+					console.log(`✅ Image compressed to ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB`);
+				}
+
+				// Generate unique filename
+				const fileName = `artist_project_${artistId}_${Date.now()}.jpg`;
+
+				// Upload to IPFS with improved function
+				imageIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName, 3);
+
+				console.log('✅ Project image uploaded to IPFS:', imageIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('❌ IPFS upload failed:', ipfsError);
+				return res.status(500).json({
+					error: 'Failed to upload image. Please try again with a smaller image or different format.'
+				});
+			}
+		}
+
+		// Create project data
+		const projectData = {
+			artistId: artistId,
+			artistName: artistData.name,
+			artistEmail: artistData.email,
+			projectName: projectName.trim(),
+			projectSymbol: projectSymbol.trim().toUpperCase(),
+			totalSupply: supply,
+			mintPrice: price,
+			imageIpfsUrl: imageIpfsData?.ipfsUrl || null,
+			imageIpfsHash: imageIpfsData?.ipfsHash || null,
+			status: 'pending',
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		};
+
+		// Save to Firebase
+		const projectRef = await db.collection('artist_projects').add(projectData);
+
+		console.log('✅ New artist project created successfully:', {
+			projectId: projectRef.id,
+			artistName: artistData.name,
+			artistEmail: artistData.email,
+			projectName: projectName.trim(),
+			projectSymbol: projectSymbol.trim().toUpperCase(),
+			ipfsUrl: imageIpfsData?.ipfsUrl
+		});
+
+		res.status(201).json({
+			success: true,
+			message: 'Project created successfully and is pending approval',
+			project: {
+				id: projectRef.id,
+				...projectData
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error creating project:', error);
+
+		// Clean up temporary file if it exists
+		if (tempImagePath && fs.existsSync(tempImagePath)) {
+			fs.unlinkSync(tempImagePath);
+		}
+
+		res.status(500).json({
+			error: 'Failed to create project. Please try again.',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+app.get('/api/artists/:artistId/projects', cors(corsOptions), async (req, res) => {
+	try {
+		const { artistId } = req.params;
+
+		console.log(`📋 Fetching projects for artist: ${artistId}`);
+
+		const artistDoc = await db.collection('artists').doc(artistId).get();
+		if (!artistDoc.exists) {
+			return res.status(404).json({ error: 'Artist not found' });
+		}
+
+		let query = db.collection('artist_projects')
+			.where('artistId', '==', artistId);
+
+		const projectsSnapshot = await query.get();
+
+		const projects = [];
+		projectsSnapshot.forEach(doc => {
+			const projectData = doc.data();
+			// ADD THIS LOG to see what's being returned
+			console.log(`Project: ${projectData.projectName}, ArtistId: ${projectData.artistId}, Expected: ${artistId}`);
+
+			projects.push({
+				id: doc.id,
+				...projectData
+			});
+		});
+
+		projects.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+		console.log(`✅ Found ${projects.length} projects for artist ${artistId}`);
+
+		res.json({
+			success: true,
+			projects: projects
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching projects:', error);
+		res.status(500).json({ error: 'Failed to fetch projects' });
+	}
+});
+
+// Update project (with IPFS image update support)
+app.put('/api/artists/projects/:projectId', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { projectName, projectSymbol, totalSupply, mintPrice, artistId, image } = req.body;
+
+		// Get existing project
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		if (!projectDoc.exists) {
+			return res.status(404).json({ error: 'Project not found' });
+		}
+
+		const existingData = projectDoc.data();
+
+		// Verify artist owns this project
+		if (existingData.artistId !== artistId) {
+			return res.status(403).json({ error: 'Access denied' });
+		}
+
+		// Prepare update data
+		const updateData = {
+			updatedAt: new Date().toISOString()
+		};
+
+		if (projectName) updateData.projectName = projectName.trim();
+		if (projectSymbol) updateData.projectSymbol = projectSymbol.trim().toUpperCase();
+		if (totalSupply) updateData.totalSupply = parseInt(totalSupply);
+		if (mintPrice) updateData.mintPrice = parseFloat(mintPrice);
+
+		// Handle image update
+		if (image) {
+			try {
+				// Remove data URL prefix if present
+				const base64Data = image.replace(/^data:image\/[a-z]+;base64,/, '');
+				const imageBuffer = Buffer.from(base64Data, 'base64');
+
+				// Generate unique filename
+				const fileName = `artist_project_update_${artistId}_${Date.now()}.jpg`;
+
+				// Upload new image to IPFS
+				const imageIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName);
+
+				// Update with new IPFS data
+				updateData.imageIpfsUrl = imageIpfsData.ipfsUrl;
+				updateData.imageIpfsHash = imageIpfsData.ipfsHash;
+
+				console.log('Project image updated on IPFS:', imageIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('IPFS upload failed during update:', ipfsError);
+				return res.status(500).json({ error: 'Failed to upload updated image to IPFS' });
+			}
+		}
+
+		// Update in database
+		await db.collection('artist_projects').doc(projectId).update(updateData);
+
+		res.json({
+			success: true,
+			message: 'Project updated successfully',
+			project: {
+				id: projectId,
+				...existingData,
+				...updateData
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating project:', error);
+		res.status(500).json({ error: 'Failed to update project' });
+	}
+});
+
+// Delete project
+app.delete('/api/artists/projects/:projectId', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { artistId } = req.body;
+
+		// Get project
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		if (!projectDoc.exists) {
+			return res.status(404).json({ error: 'Project not found' });
+		}
+
+		const projectData = projectDoc.data();
+
+		// Verify artist owns this project
+		if (projectData.artistId !== artistId) {
+			return res.status(403).json({ error: 'Access denied' });
+		}
+
+		// Delete from database (IPFS files remain on IPFS network)
+		await db.collection('artist_projects').doc(projectId).delete();
+
+		console.log('🗑️ Deleted project:', projectId, 'IPFS URL:', projectData.imageIpfsUrl);
+
+		res.json({
+			success: true,
+			message: 'Project deleted successfully'
+		});
+
+	} catch (error) {
+		console.error('❌ Error deleting project:', error);
+		res.status(500).json({ error: 'Failed to delete project' });
+	}
+});
+
+// Admin endpoints for project management
+app.get('/api/admin/artist-projects', cors(corsOptions), async (req, res) => {
+	try {
+		const { status = 'all', limit = 10, page = 1, search = '' } = req.query;
+
+		console.log('🔍 Fetching admin artist projects:', { status, limit, page, search });
+
+		// Get ALL projects first (without filtering by status initially)
+		let query = db.collection('artist_projects')
+			.orderBy('createdAt', 'desc');
+
+		const snapshot = await query.get();
+
+		let projects = [];
+		snapshot.forEach(doc => {
+			projects.push({
+				id: doc.id,
+				...doc.data()
+			});
+		});
+
+		// Apply status filter in memory
+		if (status && status !== 'all' && status !== '') {
+			console.log('🔍 Filtering by status:', status);
+			projects = projects.filter(project => project.status === status);
+		}
+
+		// Apply search filter if provided
+		if (search && search.trim() !== '') {
+			const searchLower = search.toLowerCase().trim();
+			console.log('🔍 Filtering by search:', searchLower);
+			projects = projects.filter(project =>
+				project.projectName?.toLowerCase().includes(searchLower) ||
+				project.projectSymbol?.toLowerCase().includes(searchLower) ||
+				project.artistName?.toLowerCase().includes(searchLower) ||
+				project.artistEmail?.toLowerCase().includes(searchLower)
+			);
+		}
+
+		// Calculate pagination
+		const total = projects.length;
+		const limitNum = parseInt(limit) || 10;
+		const pageNum = parseInt(page) || 1;
+		const startIndex = (pageNum - 1) * limitNum;
+		const endIndex = startIndex + limitNum;
+		const paginatedProjects = projects.slice(startIndex, endIndex);
+
+		// Calculate stats
+		const allProjects = projects; // Keep reference to all projects for stats
+		const stats = {
+			total: allProjects.length,
+			pending: allProjects.filter(p => p.status === 'pending').length,
+			approved: allProjects.filter(p => p.status === 'approved').length,
+			rejected: allProjects.filter(p => p.status === 'rejected').length
+		};
+
+		console.log('✅ Sending response:', {
+			projectsCount: paginatedProjects.length,
+			totalProjects: total,
+			stats: stats
+		});
+
+		res.json({
+			success: true,
+			projects: paginatedProjects,
+			stats: stats,
+			pagination: {
+				page: pageNum,
+				limit: limitNum,
+				total: total,
+				totalPages: Math.ceil(total / limitNum)
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching admin projects:', error);
+		res.status(500).json({
+			error: 'Failed to fetch projects',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+// Admin approve/reject project
+app.put('/api/admin/artist-projects/:projectId/status', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { status, rejectionReason } = req.body;
+
+		if (!['approved', 'rejected'].includes(status)) {
+			return res.status(400).json({ error: 'Invalid status. Must be approved or rejected.' });
+		}
+
+		const updateData = {
+			status: status,
+			updatedAt: new Date().toISOString(),
+			reviewedAt: new Date().toISOString()
+		};
+
+		if (status === 'rejected' && rejectionReason) {
+			updateData.rejectionReason = rejectionReason;
+		}
+
+		await db.collection('artist_projects').doc(projectId).update(updateData);
+
+		res.json({
+			success: true,
+			message: `Project ${status} successfully`,
+			status: status
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating project status:', error);
+		res.status(500).json({ error: 'Failed to update project status' });
+	}
+});
+
+/*ARTIST DAPP SERVER ENDS*/
+
 
 module.exports = {
 	calculateUserPayout,
