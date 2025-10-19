@@ -3346,6 +3346,72 @@ app.get('/api/certificates/:tokenId', cors(corsOptions), async (req, res) => {
 	}
 });
 
+const getUserWithdrawalsByDisbursement = async (walletAddress) => {
+	try {
+		console.log(`🔍 Fetching withdrawal history for wallet: ${walletAddress}`);
+
+		// Get PayPal document for this wallet
+		const paypalDoc = await db.collection('paypal')
+			.doc(walletAddress.toLowerCase())
+			.get();
+
+		if (!paypalDoc.exists) {
+			console.log('📝 No PayPal data found for wallet');
+			return {
+				totalWithdrawnAllTime: 0,
+				withdrawalsByDisbursement: {},
+				payouts: []
+			};
+		}
+
+		const paypalData = paypalDoc.data();
+		const payouts = paypalData.payouts || [];
+
+		// Filter only completed payouts
+		const completedPayouts = payouts.filter(payout => 
+			payout.status === 'completed'
+		);
+
+		console.log(`📊 Found ${completedPayouts.length} completed payouts`);
+
+		// Calculate total withdrawn across all disbursements
+		const totalWithdrawnAllTime = completedPayouts.reduce((sum, payout) => {
+			return sum + (parseFloat(payout.amount) || 0);
+		}, 0);
+
+		// Group withdrawals by disbursement ID
+		const withdrawalsByDisbursement = {};
+		
+		completedPayouts.forEach(payout => {
+			const disbursementId = payout.disbursementId || 'unknown';
+			
+			if (!withdrawalsByDisbursement[disbursementId]) {
+				withdrawalsByDisbursement[disbursementId] = 0;
+			}
+			
+			withdrawalsByDisbursement[disbursementId] += parseFloat(payout.amount) || 0;
+		});
+
+		console.log('📊 Withdrawals by disbursement:', withdrawalsByDisbursement);
+		console.log('💰 Total withdrawn all time:', totalWithdrawnAllTime);
+
+		return {
+			totalWithdrawnAllTime: totalWithdrawnAllTime,
+			withdrawalsByDisbursement: withdrawalsByDisbursement,
+			payouts: completedPayouts
+		};
+
+	} catch (error) {
+		console.error('❌ Error fetching user withdrawals:', error);
+		return {
+			totalWithdrawnAllTime: 0,
+			withdrawalsByDisbursement: {},
+			payouts: [],
+			error: error.message
+		};
+	}
+};
+
 const calculateUserPayout = async (userData) => {
 	try {
 		console.log('🔍 Starting payout calculation for user:', userData?.email || 'unknown');
