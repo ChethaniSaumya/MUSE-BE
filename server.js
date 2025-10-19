@@ -1,3703 +1,7146 @@
-import React, { useState, useEffect } from 'react';
-import { useAccount, useReadContract, useWriteContract, useDisconnect, useWaitForTransactionReceipt } from 'wagmi';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
-import contractABI from '../contractData/contract.json';
-import './Admin.css';
-import AdminContractManagement from '../components/admin/AdminContractManagement';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const { createCanvas, loadImage, registerFont } = require('canvas');
+const fs = require('fs');
+const path = require('path');
+const { db } = require('./firebase');
+const FormData = require('form-data');
+const axios = require('axios');
+const archiver = require('archiver');
+const app = express();
+const Web3 = require('web3');
+const web3 = new Web3(new Web3.providers.HttpProvider('https://methodical-intensive-reel.matic.quiknode.pro/f053d766df9716bed741c91f5c0815633a15ab94/'));
+const nodemailer = require('nodemailer');
+const paypal = require('@paypal/checkout-server-sdk');
+const payoutsSDK = require('@paypal/payouts-sdk')
+const rateLimit = require('express-rate-limit');
+const admin = require('firebase-admin');
+const sharp = require('sharp');
 
-// Type definitions for TypeScript
-interface NotificationType {
-	message: string;
-	type: 'success' | 'error' | 'info' | 'warning';
+const Environment = process.env.NODE_ENV === 'production'
+	? paypal.core.LiveEnvironment
+	: paypal.core.SandboxEnvironment;
+
+const paypalClient = new paypal.core.PayPalHttpClient(
+	new Environment(
+		process.env.PAYPAL_CLIENT_ID,
+		process.env.PAYPAL_CLIENT_SECRET
+	)
+);
+
+/*
+const adminLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000, // 15 minutes
+	max: 10, // Max 10 requests per 15 minutes
+	message: { error: 'Too many admin requests. Please try again later.' },
+	standardHeaders: true,
+	legacyHeaders: false
+});*/
+
+let emailTransporter;
+try {
+	/*emailTransporter = nodemailer.createTransport({  // Changed from createTransporter to createTransport
+		service: 'gmail', // or 'SendGrid', 'Mailgun', etc.
+		auth: {
+			user: process.env.EMAIL_USER, // Your email
+			pass: process.env.EMAIL_PASS  // Your email password or app password
+		}
+	});*/
+
+	emailTransporter = nodemailer.createTransport({
+		host: 'smtpout.secureserver.net', // GoDaddy SMTP server
+		port: 465, // or 587 for TLS
+		secure: true, // true for 465, false for 587
+		auth: {
+			user: process.env.EMAIL_USER, // Your full GoDaddy email address
+			pass: process.env.EMAIL_PASS  // Your GoDaddy email password
+		}
+	});
+
+} catch (error) {
+	console.error('❌ Failed to create email transporter:', error);
+	process.exit(1);
 }
 
-interface Document {
-	id?: string;
-	documentType?: string;
-	walletAddress: string;
-	uploadedAt: string;
-	verified?: boolean;
-	rejectionReason?: string;
-	userName?: string;
-	email?: string;
-	frontImageUrl?: string;
-	backImageUrl?: string;
-	hasBackImage?: boolean;
-	ipfsUrl?: string;
-}
+const compressImage = async (imageBuffer, maxWidth = 1200, quality = 80) => {
+	try {
+		console.log('🖼️ Compressing image...');
 
-interface TaxIdDocument {
-	id?: string;
-	taxIdType?: string;
-	walletAddress: string;
-	uploadedAt: string;
-	verified?: boolean;
-	rejectionReason?: string;
-	userName?: string;
-	email?: string;
-	ipfsUrl?: string;
-}
+		const image = sharp(imageBuffer);
+		const metadata = await image.metadata();
 
-interface PayoutLimits {
-	totalLimit?: number;
-	remainingLimit?: number;
-	usedAmount?: number;
-	isSet?: boolean;
-}
+		let width = metadata.width;
+		let height = metadata.height;
 
-interface DisbursementRecord {
-	id?: string;
-	createdAt: string;
-	fromDate?: string;
-	toDate?: string;
-	period?: string;
-	totalLimit?: number;
-	isActive?: boolean;
-	comments?: string;
-}
+		// Resize if necessary
+		if (width > maxWidth) {
+			height = Math.round((height / width) * maxWidth);
+			width = maxWidth;
+		}
 
-interface User {
-	walletAddress: string;
-	name?: string;
-	email?: string;
-	totalMinted?: number;
-}
+		// Compress image
+		const compressedBuffer = await image
+			.resize(width, height, {
+				fit: 'inside',
+				withoutEnlargement: true
+			})
+			.jpeg({
+				quality,
+				progressive: true,
+				mozjpeg: true
+			})
+			.toBuffer();
 
-interface Pagination {
-	totalDocuments?: number;
-	totalPages?: number;
-	hasPrevPage?: boolean;
-	hasNextPage?: boolean;
-	totalRecords?: number;
-}
+		const originalSize = (imageBuffer.length / 1024 / 1024).toFixed(2);
+		const compressedSize = (compressedBuffer.length / 1024 / 1024).toFixed(2);
 
-interface DocumentStats {
-	total?: number;
-	pending?: number;
-	approved?: number;
-	rejected?: number;
-}
+		console.log(`✅ Image compressed: ${originalSize}MB → ${compressedSize}MB`);
 
-interface DisbursementStats {
-	totalDisbursements?: number;
-	totalAmountDisbursed?: number;
-	totalAmountUsed?: number;
-	activeDisbursements?: number;
-}
-
-interface ArtistProject {
-	id: string;
-	projectName: string;
-	projectSymbol: string;
-	totalSupply: number;
-	mintPrice: number;
-	artistName: string;
-	artistEmail: string;
-	artistId: string;
-	contractOwner: string;
-	contractAddress?: string;
-	networkId?: string;
-	status: 'pending' | 'approved' | 'rejected';
-	imageIpfsUrl?: string;
-	createdAt: string;
-	updatedAt: string;
-	rejectionReason?: string;
-	mintingEnabled?: boolean;
-}
-
-interface ArtistProjectsStats {
-	total?: number;
-	pending?: number;
-	approved?: number;
-	rejected?: number;
-}
-
-const AdminPanel = () => {
-	const { address, isConnected } = useAccount();
-	const { disconnect } = useDisconnect();
-	const [isOwner, setIsOwner] = useState(false);
-	const [loading, setLoading] = useState(true);
-	const [notification, setNotification] = useState<NotificationType | null>(null);
-	const [activeUpdate, setActiveUpdate] = useState<string | null>(null);
-	const [activeTab, setActiveTab] = useState('contract');
-
-	// State variables
-	const [publicMintStatus, setPublicMintStatusState] = useState(false);
-	const [maxPerWallet, setMaxPerWalletState] = useState(1);
-	const [additionalPrice, setAdditionalPriceState] = useState(0);
-	const [isAirdropping, setIsAirdropping] = useState(false);
-	const [airdropReceiver, setAirdropReceiver] = useState('');
-	const [airdropName, setAirdropName] = useState('');
-	const [airdropEmail, setAirdropEmail] = useState('');
-	const [pendingAirdrop, setPendingAirdrop] = useState<any>(null);
-	const [airdropTokenId, setAirdropTokenId] = useState('');
-	const [newOwnerAddress, setNewOwnerAddress] = useState('');
-	const [isTransferring, setIsTransferring] = useState(false);
-	const [isWithdrawing, setIsWithdrawing] = useState(false);
-	const [basePrice, setBasePriceState] = useState(0);
-
-	const [bulkAirdropFile, setBulkAirdropFile] = useState<File | null>(null);
-	const [bulkAirdropData, setBulkAirdropData] = useState<any[]>([]);
-	const [isProcessingBulkAirdrop, setIsProcessingBulkAirdrop] = useState(false);
-	const [bulkAirdropProgress, setBulkAirdropProgress] = useState(0);
-	const [bulkAirdropTxHash, setBulkAirdropTxHash] = useState<string | null>(null);
-
-	// Document management states
-	const [documents, setDocuments] = useState<Document[]>([]);
-	const [pagination, setPagination] = useState<Pagination>({});
-	const [documentStats, setDocumentStats] = useState<DocumentStats>({});
-	const [currentPage, setCurrentPage] = useState(1);
-	const [searchTerm, setSearchTerm] = useState('');
-	const [documentsPerPage, setDocumentsPerPage] = useState(10);
-	const [selectedDocument, setSelectedDocument] = useState<Document | null>(null);
-	const [showDocumentModal, setShowDocumentModal] = useState(false);
-	const [isVerifying, setIsVerifying] = useState(false);
-	const [rejectionReason, setRejectionReason] = useState('');
-	const [showRejectionModal, setShowRejectionModal] = useState(false);
-	const [documentFilter, setDocumentFilter] = useState('all');
-
-	// Tax ID document states
-	const [taxIdDocuments, setTaxIdDocuments] = useState<TaxIdDocument[]>([]);
-	const [taxIdPagination, setTaxIdPagination] = useState<Pagination>({});
-	const [taxIdStats, setTaxIdStats] = useState<DocumentStats>({});
-	const [taxIdCurrentPage, setTaxIdCurrentPage] = useState(1);
-	const [taxIdSearchTerm, setTaxIdSearchTerm] = useState('');
-	const [taxIdFilter, setTaxIdFilter] = useState('all');
-	const [selectedTaxIdDocument, setSelectedTaxIdDocument] = useState<TaxIdDocument | null>(null);
-	const [showTaxIdModal, setShowTaxIdModal] = useState(false);
-	const [showTaxIdRejectionModal, setShowTaxIdRejectionModal] = useState(false);
-	const [taxIdRejectionReason, setTaxIdRejectionReason] = useState('');
-	const [isVerifyingTaxId, setIsVerifyingTaxId] = useState(false);
-
-	const [artistProjects, setArtistProjects] = useState([]);
-	const [artistProjectsLoading, setArtistProjectsLoading] = useState(false);
-	const [artistProjectsFilter, setArtistProjectsFilter] = useState('all');
-	const [artistProjectsSearch, setArtistProjectsSearch] = useState('');
-	const [artistProjectsPage, setArtistProjectsPage] = useState(1);
-	const [artistProjectsStats, setArtistProjectsStats] = useState<ArtistProjectsStats>({});
-
-	// ADD THIS LINE - Missing state declaration
-	const [selectedProject, setSelectedProject] = useState<any>(null); // Add this line
-
-	interface ArtistProjectsStats {
-		total?: number;
-		pending?: number;
-		approved?: number;
-		rejected?: number;
+		return compressedBuffer;
+	} catch (error) {
+		console.error('❌ Image compression failed:', error);
+		throw error;
 	}
-
-	const fetchArtistProjects = async (page = 1, status = 'all', search = '') => {
-		try {
-			setArtistProjectsLoading(true);
-
-			// Always send 'all' for the all filter, not empty string
-			const statusParam = status === 'all' ? 'all' : status;
-
-			const params = new URLSearchParams({
-				page: page.toString(),
-				limit: '10',
-				status: statusParam,
-				search: search
-			});
-
-			console.log('🔍 Fetching artist projects with params:', {
-				page,
-				status: statusParam,
-				search
-			});
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/artist-projects?${params}`);
-
-			if (response.ok) {
-				const data = await response.json();
-				console.log('✅ Artist projects fetched successfully:', {
-					projectsCount: data.projects?.length,
-					stats: data.stats,
-					pagination: data.pagination
-				});
-
-				setArtistProjects(data.projects || []);
-				setArtistProjectsStats(data.stats || {});
-
-			} else {
-				console.error('❌ Failed to load artist projects:', response.status);
-				const errorText = await response.text();
-				console.error('❌ Error response:', errorText);
-				showNotification('Failed to load artist projects', 'error');
-			}
-		} catch (error) {
-			console.error('❌ Error fetching artist projects:', error);
-			showNotification('Error loading artist projects', 'error');
-		} finally {
-			setArtistProjectsLoading(false);
-		}
-	};
-
-	// Payout management states
-	const [payoutLimits, setPayoutLimits] = useState<PayoutLimits>({
-		totalLimit: 0,
-		remainingLimit: 0,
-		usedAmount: 0,
-		isSet: false
-	});
-	const [newPayoutLimit, setNewPayoutLimit] = useState('');
-	const [isUpdatingLimits, setIsUpdatingLimits] = useState(false);
-
-	// Disbursement management state
-	const [projectName, setProjectName] = useState('');
-	const [disbursementComments, setDisbursementComments] = useState('');
-	const [disbursementHistory, setDisbursementHistory] = useState<DisbursementRecord[]>([]);
-	const [disbursementPagination, setDisbursementPagination] = useState<Pagination>({});
-	const [disbursementStats, setDisbursementStats] = useState<DisbursementStats>({});
-	const [disbursementCurrentPage, setDisbursementCurrentPage] = useState(1);
-	const [disbursementSearchTerm, setDisbursementSearchTerm] = useState('');
-	const [disbursementPerPage, setDisbursementPerPage] = useState(10);
-	const [isLoadingDisbursements, setIsLoadingDisbursements] = useState(false);
-	const [disbursementFromDate, setDisbursementFromDate] = useState('');
-	const [disbursementToDate, setDisbursementToDate] = useState('');
-
-	// Payout search states
-	const [payoutSearchMethod, setPayoutSearchMethod] = useState('wallet');
-	const [payoutSearchValue, setPayoutSearchValue] = useState('');
-	const [payoutSearchResults, setPayoutSearchResults] = useState<User[]>([]);
-	const [selectedUserForPayout, setSelectedUserForPayout] = useState<User | null>(null);
-	const [isSearchingUsers, setIsSearchingUsers] = useState(false);
-	const [isRefreshingPayouts, setIsRefreshingPayouts] = useState(false);
-	const [refreshResults, setRefreshResults] = useState<any>(null);
-	const [copiedWallet, setCopiedWallet] = useState<string | null>(null);
-
-	// Contract configuration
-	const contractConfig = {
-		address: contractABI.address as `0x${string}`,
-		abi: contractABI.abi,
-	};
-
-	// Check if connected wallet is owner
-	const { data: ownerAddress } = useReadContract({
-		...contractConfig,
-		functionName: 'owner',
-	});
-
-	// Read current contract settings
-	const { data: currentPublicMintStatus } = useReadContract({
-		...contractConfig,
-		functionName: 'public_mint_status',
-	});
-
-	const { data: currentMaxPerWallet } = useReadContract({
-		...contractConfig,
-		functionName: 'max_per_wallet',
-	});
-
-	const { data: currentAdditionalPrice } = useReadContract({
-		...contractConfig,
-		functionName: 'additionalPrice',
-	});
-
-	const { data: currentBasePrice } = useReadContract({
-		...contractConfig,
-		functionName: 'basePrice',
-	});
-
-	const { data: totalSupply } = useReadContract({
-		...contractConfig,
-		functionName: 'totalSupply',
-	});
-
-	const { data: contractBalance } = useReadContract({
-		...contractConfig,
-		functionName: 'getBalance',
-	});
-
-	// Contract write hooks
-	const { writeContract: updatePublicMintStatus } = useWriteContract({
-		mutation: {
-			onSuccess: async () => {
-				setActiveUpdate(null);
-				showNotification('Public mint status updated successfully', 'success');
-				setTimeout(() => {
-					window.location.reload();
-				}, 1000);
-			},
-			onError: (error) => {
-				showNotification(`Failed: ${error.message}`, 'error');
-				setActiveUpdate(null);
-			}
-		}
-	});
-
-	const { writeContract: updateMaxPerWallet } = useWriteContract({
-		mutation: {
-			onSuccess: async () => {
-				setActiveUpdate(null);
-				showNotification('Max per wallet updated successfully', 'success');
-				setTimeout(() => {
-					window.location.reload();
-				}, 1000);
-			},
-			onError: (error) => {
-				showNotification(`Failed: ${error.message}`, 'error');
-				setActiveUpdate(null);
-			}
-		}
-	});
-
-	const { writeContract: updateAdditionalPrice } = useWriteContract({
-		mutation: {
-			onSuccess: async () => {
-				setActiveUpdate(null);
-				showNotification('Additional price updated successfully', 'success');
-				setTimeout(() => {
-					window.location.reload();
-				}, 1000);
-			},
-			onError: (error) => {
-				showNotification(`Failed: ${error.message}`, 'error');
-				setActiveUpdate(null);
-			}
-		}
-	});
-
-	const { writeContract: updateBasePrice } = useWriteContract({
-		mutation: {
-			onSuccess: async () => {
-				setActiveUpdate(null);
-				showNotification('Base price updated successfully', 'success');
-				setTimeout(() => {
-					window.location.reload();
-				}, 1000);
-			},
-			onError: (error) => {
-				showNotification(`Failed: ${error.message}`, 'error');
-				setActiveUpdate(null);
-			}
-		}
-	});
-
-	const { writeContract: executeTransferOwnership } = useWriteContract({
-		mutation: {
-			onSuccess: async () => {
-				setIsTransferring(false);
-				showNotification('Ownership transferred successfully', 'success');
-				setNewOwnerAddress('');
-				setTimeout(() => {
-					window.location.reload();
-				}, 2000);
-			},
-			onError: (error) => {
-				showNotification(`Transfer failed: ${error.message}`, 'error');
-				setIsTransferring(false);
-			}
-		}
-	});
-
-	const { writeContract: executeWithdraw } = useWriteContract({
-		mutation: {
-			onSuccess: async () => {
-				setIsWithdrawing(false);
-				showNotification('Funds withdrawn successfully', 'success');
-				setTimeout(() => {
-					window.location.reload();
-				}, 1000);
-			},
-			onError: (error) => {
-				showNotification(`Withdrawal failed: ${error.message}`, 'error');
-				setIsWithdrawing(false);
-			}
-		}
-	});
-
-	const { writeContract: executeAirdrop } = useWriteContract({
-		mutation: {
-			onSuccess: (data) => {
-				console.log('🚀 Airdrop transaction initiated:', data);
-				setPendingAirdrop({
-					address: airdropReceiver,
-					name: airdropName,
-					email: airdropEmail,
-					tokenId: airdropTokenId
-				});
-				showNotification('Airdrop transaction submitted, waiting for confirmation...', 'info');
-			},
-			onError: (error) => {
-				console.error('❌ Airdrop transaction failed:', error);
-				showNotification(`Airdrop failed: ${error.message}`, 'error');
-				setIsAirdropping(false);
-			}
-		}
-	});
-
-	const { writeContract: executeBulkAirdrop } = useWriteContract({
-		mutation: {
-			onSuccess: (data) => {
-				console.log('🚀 Bulk Airdrop transaction initiated:', data);
-				setBulkAirdropTxHash(data);
-				showNotification(`Bulk airdrop for ${bulkAirdropData.length} NFTs submitted, waiting for confirmation...`, 'info');
-			},
-			onError: (error) => {
-				console.error('❌ Bulk Airdrop transaction failed:', error);
-				showNotification(`Bulk airdrop failed: ${error.message}`, 'error');
-				setIsProcessingBulkAirdrop(false);
-				setBulkAirdropProgress(0);
-			}
-		}
-	});
-
-	const { isLoading: isWaitingForTx, isSuccess: isTxSuccess, isError: isTxError } = useWaitForTransactionReceipt({
-		hash: pendingAirdrop?.transactionHash as `0x${string}`,
-	});
-
-	// Then use useEffect to handle the success and error states
-	useEffect(() => {
-		if (isTxSuccess && pendingAirdrop) {
-			console.log('✅ Airdrop transaction confirmed');
-
-			const handleSuccess = async () => {
-				try {
-					const backendData = {
-						name: pendingAirdrop.name,
-						email: pendingAirdrop.email,
-						walletAddress: pendingAirdrop.address,
-						transactionHash: pendingAirdrop.transactionHash,
-						tokenId: pendingAirdrop.tokenId.toString(),
-						nftMinted: true,
-						mintedAt: new Date().toISOString(),
-						ageConfirmed: true,
-						termsAccepted: true,
-						privacyPolicyAccepted: true,
-						subscribe: true,
-						isAirdrop: true
-					};
-
-					console.log('📤 Sending to backend:', backendData);
-
-					const response = await fetch(`https://muse-be.onrender.com/api/users`, {
-						method: 'POST',
-						headers: {
-							'Content-Type': 'application/json',
-						},
-						body: JSON.stringify(backendData)
-					});
-
-					if (!response.ok) {
-						console.error('❌ Backend error');
-						showNotification('Airdrop completed but failed to save user data', 'warning');
-					} else {
-						const result = await response.json();
-						console.log('✅ Backend success:', result);
-						showNotification('Airdrop completed successfully!', 'success');
-					}
-
-				} catch (error) {
-					console.error('❌ Backend request failed:', error);
-					showNotification('Airdrop completed but failed to save user data', 'warning');
-				}
-
-				setAirdropReceiver('');
-				setAirdropName('');
-				setAirdropEmail('');
-				setAirdropTokenId('');
-				setIsAirdropping(false);
-				setPendingAirdrop(null);
-
-				setTimeout(() => {
-					window.location.reload();
-				}, 2000);
-			};
-
-			handleSuccess();
-		}
-	}, [isTxSuccess, pendingAirdrop]);
-
-	useEffect(() => {
-		if (isTxError) {
-			console.error('❌ Transaction failed');
-			showNotification('Airdrop transaction failed', 'error');
-			setIsAirdropping(false);
-			setPendingAirdrop(null);
-		}
-	}, [isTxError]);
-
-	// Check owner status
-	useEffect(() => {
-		if (address && ownerAddress) {
-			setIsOwner(address.toLowerCase() === (ownerAddress as string).toLowerCase());
-			setLoading(false);
-		} else {
-			setLoading(false);
-		}
-	}, [address, ownerAddress]);
-
-	// Add this useEffect in your component - CORRECTED VERSION
-
-	useEffect(() => {
-		// Check if any modal is open
-		const isModalOpen = selectedProject !== null ||
-			showDocumentModal ||
-			showTaxIdModal ||
-			showRejectionModal ||
-			showTaxIdRejectionModal;
-
-		if (isModalOpen) {
-			document.body.classList.add('modal-open');
-			document.body.style.overflow = 'hidden';
-			document.body.style.position = 'fixed';
-			document.body.style.width = '100%';
-			document.body.style.height = '100%';
-		} else {
-			document.body.classList.remove('modal-open');
-			document.body.style.overflow = '';
-			document.body.style.position = '';
-			document.body.style.width = '';
-			document.body.style.height = '';
-		}
-
-		// Cleanup on unmount
-		return () => {
-			document.body.classList.remove('modal-open');
-			document.body.style.overflow = '';
-			document.body.style.position = '';
-			document.body.style.width = '';
-			document.body.style.height = '';
-		};
-	}, [selectedProject, showDocumentModal, showTaxIdModal, showRejectionModal, showTaxIdRejectionModal]);
-	// Set initial form values from contract
-	useEffect(() => {
-		if (currentPublicMintStatus !== undefined) {
-			setPublicMintStatusState(Boolean(currentPublicMintStatus));
-		}
-		if (currentMaxPerWallet !== undefined) {
-			setMaxPerWalletState(Number(currentMaxPerWallet));
-		}
-		if (currentAdditionalPrice !== undefined) {
-			setAdditionalPriceState(Number(currentAdditionalPrice) / 1000000000000000000);
-		}
-		if (currentBasePrice !== undefined) {
-			setBasePriceState(Number(currentBasePrice) / 1000000000000000000);
-		}
-	}, [currentPublicMintStatus, currentMaxPerWallet, currentAdditionalPrice, currentBasePrice]);
-
-	// Notification function
-	const showNotification = (message: string, type: 'success' | 'error' | 'info' | 'warning' = 'success') => {
-		console.log(`📢 Notification [${type}]:`, message);
-		setNotification({ message, type });
-
-		setTimeout(() => {
-			setNotification(null);
-		}, 5000);
-	};
-
-	// Handle form submissions
-	const handlePublicMintStatusChange = async () => {
-		try {
-			setActiveUpdate('publicMintStatus');
-			await updatePublicMintStatus({
-				...contractConfig,
-				functionName: 'setPublic_mint_status',
-				args: [publicMintStatus],
-			} as any);
-		} catch (err) {
-			setActiveUpdate(null);
-		}
-	};
-
-	const handleMaxPerWalletChange = async () => {
-		try {
-			setActiveUpdate('maxPerWallet');
-			await updateMaxPerWallet({
-				...contractConfig,
-				functionName: 'setMax_per_wallet',
-				args: [maxPerWallet],
-			} as any);
-		} catch (err) {
-			setActiveUpdate(null);
-		}
-	};
-
-	const handleAdditionalPriceChange = async () => {
-		try {
-			setActiveUpdate('additionalPrice');
-			await updateAdditionalPrice({
-				...contractConfig,
-				functionName: 'setAdditionalPrice',
-				args: [BigInt(Math.floor(additionalPrice * 1000000000000000000))],
-			} as any);
-		} catch (err) {
-			setActiveUpdate(null);
-		}
-	};
-
-	const handleBasePriceChange = async () => {
-		try {
-			setActiveUpdate('basePrice');
-			await updateBasePrice({
-				...contractConfig,
-				functionName: 'setBasePrice',
-				args: [BigInt(Math.floor(basePrice * 1000000000000000000))],
-			} as any);
-		} catch (err) {
-			setActiveUpdate(null);
-		}
-	};
-
-	const handleAirdrop = async () => {
-		// Validation
-		if (!airdropReceiver || !airdropName || !airdropEmail || !airdropTokenId) {
-			showNotification('Please fill in all fields', 'error');
-			return;
-		}
-
-		// Validate Ethereum address
-		const addressRegex = /^0x[a-fA-F0-9]{40}$/;
-		if (!addressRegex.test(airdropReceiver)) {
-			showNotification('Please enter a valid Ethereum address', 'error');
-			return;
-		}
-
-		// Validate email
-		const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-		if (!emailRegex.test(airdropEmail)) {
-			showNotification('Please enter a valid email address', 'error');
-			return;
-		}
-
-		// Validate token ID
-		const tokenIdNum = parseInt(airdropTokenId);
-		if (isNaN(tokenIdNum) || tokenIdNum < 0) {
-			showNotification('Please enter a valid token ID (0 or positive number)', 'error');
-			return;
-		}
-
-		try {
-			setIsAirdropping(true);
-			console.log('🎯 Executing airdrop:', {
-				receiver: airdropReceiver,
-				name: airdropName,
-				email: airdropEmail,
-				tokenId: tokenIdNum
-			});
-
-			await executeAirdrop({
-				...contractConfig,
-				functionName: 'airdrop',
-				args: [
-					airdropReceiver as `0x${string}`,
-					airdropName,
-					airdropEmail,
-					BigInt(tokenIdNum)
-				],
-			} as any);
-
-		} catch (error: any) {
-			console.error('❌ Error executing airdrop:', error);
-			showNotification(`Failed to execute airdrop: ${error.message}`, 'error');
-			setIsAirdropping(false);
-		}
-	};
-
-	const isAirdropDisabled = isAirdropping ||
-		isWaitingForTx ||
-		!airdropReceiver ||
-		!airdropName ||
-		!airdropEmail ||
-		!airdropTokenId;
-
-	// Handle bulk airdrop file upload
-	const handleBulkAirdropFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-		const file = e.target.files?.[0];
-		if (!file) return;
-
-		setBulkAirdropFile(file);
-		setBulkAirdropProgress(0);
-
-		const reader = new FileReader();
-		reader.onload = async (e) => {
-			try {
-				setIsProcessingBulkAirdrop(true);
-				const content = e.target?.result as string;
-				const lines = content.split('\n').filter(line => line.trim() !== '');
-
-				const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-				const data = [];
-
-				for (let i = 1; i < lines.length; i++) {
-					const values = lines[i].split(',');
-					if (values.length < 4) continue;
-
-					const item = {
-						address: values[headers.indexOf('address')].trim(),
-						name: values[headers.indexOf('name')].trim(),
-						email: values[headers.indexOf('email')].trim(),
-						tokenId: parseInt(values[headers.indexOf('tokenid')].trim())
-					};
-
-					if (
-						!/^0x[a-fA-F0-9]{40}$/.test(item.address) ||
-						!item.name ||
-						!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email) ||
-						isNaN(item.tokenId) || item.tokenId < 0
-					) {
-						console.error('Invalid data in row', i, item);
-						continue;
-					}
-
-					data.push(item);
-					setBulkAirdropProgress(Math.floor((i / (lines.length - 1)) * 100));
-				}
-
-				setBulkAirdropData(data);
-				setIsProcessingBulkAirdrop(false);
-				showNotification(`Successfully parsed ${data.length} valid airdrop entries`, 'success');
-
-			} catch (error) {
-				console.error('Error parsing CSV:', error);
-				showNotification('Error parsing CSV file. Please check the format.', 'error');
-				setIsProcessingBulkAirdrop(false);
-			}
-		};
-		reader.readAsText(file);
-	};
-
-	const handleBulkAirdrop = async () => {
-		if (bulkAirdropData.length === 0) {
-			showNotification('No valid airdrop data to process', 'error');
-			return;
-		}
-
-		if (bulkAirdropData.length > 500) {
-			showNotification('Maximum 500 airdrops at once', 'error');
-			return;
-		}
-
-		try {
-			setIsProcessingBulkAirdrop(true);
-			await executeBulkAirdrop({
-				...contractConfig,
-				functionName: 'bulkAirdrop',
-				args: [
-					bulkAirdropData.map(item => item.address as `0x${string}`),
-					bulkAirdropData.map(item => item.name),
-					bulkAirdropData.map(item => item.email),
-					bulkAirdropData.map(item => BigInt(item.tokenId))
-				],
-			} as any);
-		} catch (error: any) {
-			console.error('Error executing bulk airdrop:', error);
-			showNotification(`Failed to execute bulk airdrop: ${error.message}`, 'error');
-			setIsProcessingBulkAirdrop(false);
-		}
-	};
-
-	const handleTransferOwnership = async () => {
-		// Validation
-		if (!newOwnerAddress) {
-			showNotification('Please enter a new owner address', 'error');
-			return;
-		}
-
-		// Validate Ethereum address
-		const addressRegex = /^0x[a-fA-F0-9]{40}$/;
-		if (!addressRegex.test(newOwnerAddress)) {
-			showNotification('Please enter a valid Ethereum address', 'error');
-			return;
-		}
-
-		// Confirm with user
-		const confirmed = window.confirm(
-			`Are you sure you want to transfer ownership to ${newOwnerAddress}? This action cannot be undone!`
-		);
-
-		if (!confirmed) return;
-
-		try {
-			setIsTransferring(true);
-			console.log('🔄 Transferring ownership to:', newOwnerAddress);
-			await executeTransferOwnership({
-				...contractConfig,
-				functionName: 'transferOwnership',
-				args: [newOwnerAddress as `0x${string}`],
-			} as any);
-		} catch (error: any) {
-			console.error('❌ Error transferring ownership:', error);
-			showNotification(`Failed to transfer ownership: ${error.message}`, 'error');
-			setIsTransferring(false);
-		}
-	};
-
-	// Handle withdraw
-	const handleWithdraw = async () => {
-		// Confirm with user
-		const confirmed = window.confirm(
-			'Are you sure you want to withdraw all funds from the contract?'
-		);
-
-		if (!confirmed) return;
-
-		try {
-			setIsWithdrawing(true);
-			console.log('💰 Withdrawing funds...');
-			await executeWithdraw({
-				...contractConfig,
-				functionName: 'withdraw',
-				args: [],
-			} as any);
-		} catch (error: any) {
-			console.error('❌ Error withdrawing funds:', error);
-			showNotification(`Failed to withdraw funds: ${error.message}`, 'error');
-			setIsWithdrawing(false);
-		}
-	};
-	// Document management functions
-	const fetchDocuments = async (page = 1, status = 'all', search = '') => {
-		try {
-			const params = new URLSearchParams({
-				page: page.toString(),
-				limit: documentsPerPage.toString(),
-				status,
-				search,
-				sortBy: 'uploadedAt',
-				sortOrder: 'desc'
-			});
-
-			console.log('🔍 Fetching identity documents with params:', { page, status, search, limit: documentsPerPage });
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/identity-documents?${params}`);
-
-			if (response.ok) {
-				const data = await response.json();
-				console.log('✅ Identity documents fetched successfully:', data);
-
-				setDocuments(data.documents || []);
-				setPagination(data.pagination || {});
-				setDocumentStats(data.stats || {});
-				setCurrentPage(page);
-			} else {
-				console.error('❌ Failed to load identity documents:', response.status);
-				showNotification('Failed to load identity documents', 'error');
-			}
-		} catch (error) {
-			console.error('❌ Error fetching identity documents:', error);
-			showNotification('Error loading identity documents', 'error');
-		}
-	};
-
-	const fetchTaxIdDocuments = async (page = 1, status = 'all', search = '') => {
-		try {
-			const params = new URLSearchParams({
-				page: page.toString(),
-				limit: documentsPerPage.toString(),
-				status,
-				search,
-				sortBy: 'uploadedAt',
-				sortOrder: 'desc'
-			});
-
-			console.log('🔍 Fetching tax ID documents with params:', { page, status, search, limit: documentsPerPage });
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/tax-id-documents?${params}`);
-
-			if (response.ok) {
-				const data = await response.json();
-				console.log('✅ Tax ID documents fetched successfully:', data);
-
-				setTaxIdDocuments(data.documents || []);
-				setTaxIdPagination(data.pagination || {});
-				setTaxIdStats(data.stats || {});
-				setTaxIdCurrentPage(page);
-			} else {
-				console.error('❌ Failed to load tax ID documents:', response.status);
-				showNotification('Failed to load tax ID documents', 'error');
-			}
-		} catch (error) {
-			console.error('❌ Error fetching tax ID documents:', error);
-			showNotification('Error loading tax ID documents', 'error');
-		}
-	};
-
-	const handleVerifyDocument = async (walletAddress: string, approved: boolean, reason = '') => {
-		try {
-			setIsVerifying(true);
-			console.log('🔄 Verifying identity document:', { walletAddress, approved, reason });
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/paypal/${walletAddress}/verify-identity`, {
-				method: 'PUT',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					verified: approved,
-					rejectionReason: approved ? '' : reason
-				})
-			});
-
-			const data = await response.json();
-
-			if (response.ok && data.success) {
-				showNotification(
-					approved ? 'Identity document approved successfully!' : 'Identity document rejected successfully!',
-					'success'
-				);
-
-				await fetchDocuments(currentPage, documentFilter, searchTerm);
-
-				setShowDocumentModal(false);
-				setShowRejectionModal(false);
-				setSelectedDocument(null);
-				setRejectionReason('');
-			} else {
-				showNotification(data.error || 'Failed to update document status', 'error');
-			}
-		} catch (error) {
-			console.error('❌ Error verifying identity document:', error);
-			showNotification('Error updating document status', 'error');
-		} finally {
-			setIsVerifying(false);
-		}
-	};
-
-	const handleVerifyTaxIdDocument = async (walletAddress: string, approved: boolean, reason = '') => {
-		try {
-			setIsVerifyingTaxId(true);
-			console.log('🔄 Verifying tax ID document:', { walletAddress, approved, reason });
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/paypal/${walletAddress}/verify-tax-id`, {
-				method: 'PUT',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					verified: approved,
-					rejectionReason: approved ? '' : reason
-				})
-			});
-
-			const data = await response.json();
-
-			if (response.ok && data.success) {
-				showNotification(
-					approved ? 'Tax ID document approved successfully!' : 'Tax ID document rejected successfully!',
-					'success'
-				);
-
-				await fetchTaxIdDocuments(taxIdCurrentPage, taxIdFilter, taxIdSearchTerm);
-
-				setShowTaxIdModal(false);
-				setShowTaxIdRejectionModal(false);
-				setSelectedTaxIdDocument(null);
-				setTaxIdRejectionReason('');
-			} else {
-				showNotification(data.error || 'Failed to update tax ID document status', 'error');
-			}
-		} catch (error) {
-			console.error('❌ Error verifying tax ID document:', error);
-			showNotification('Error updating tax ID document status', 'error');
-		} finally {
-			setIsVerifyingTaxId(false);
-		}
-	};
-
-	const openDocumentModal = (document: Document) => {
-		console.log('📄 Opening identity document modal:', document);
-		setSelectedDocument(document);
-		setShowDocumentModal(true);
-	};
-
-	const openTaxIdModal = (document: TaxIdDocument) => {
-		console.log('📄 Opening tax ID document modal:', document);
-		setSelectedTaxIdDocument(document);
-		setShowTaxIdModal(true);
-	};
-
-	const handleRejectClick = () => {
-		setShowDocumentModal(false);
-		setShowRejectionModal(true);
-	};
-
-	const handleTaxIdRejectClick = () => {
-		setShowTaxIdModal(false);
-		setShowTaxIdRejectionModal(true);
-	};
-
-	const handleRejectSubmit = async () => {
-		if (!rejectionReason.trim()) {
-			showNotification('Please provide a rejection reason', 'error');
-			return;
-		}
-
-		await handleVerifyDocument(selectedDocument!.walletAddress, false, rejectionReason.trim());
-	};
-
-	const handleTaxIdRejectSubmit = async () => {
-		if (!taxIdRejectionReason.trim()) {
-			showNotification('Please provide a rejection reason', 'error');
-			return;
-		}
-
-		await handleVerifyTaxIdDocument(selectedTaxIdDocument!.walletAddress, false, taxIdRejectionReason.trim());
-	};
-
-	const formatDocumentType = (type?: string) => {
-		if (!type) return 'Unknown';
-		return type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-	};
-
-	const formatTaxIdType = (type?: string) => {
-		const typeMap: { [key: string]: string } = {
-			'ssn_card': 'Social Security Card',
-			'tax_return': 'Tax Return (1040)',
-			'ein_letter': 'EIN Assignment Letter',
-			'itin_letter': 'ITIN Assignment Letter',
-			'other': 'Other Tax Document'
-		};
-		return typeMap[type!] || type!.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-	};
-
-	const handleCopyWallet = async (walletAddress: string) => {
-		try {
-			await navigator.clipboard.writeText(walletAddress);
-			setCopiedWallet(walletAddress);
-			showNotification('Wallet address copied to clipboard', 'success');
-
-			setTimeout(() => {
-				setCopiedWallet(null);
-			}, 2000);
-		} catch (error) {
-			console.error('Failed to copy wallet address:', error);
-			showNotification('Failed to copy wallet address', 'error');
-		}
-	};
-
-	// Payout management functions
-	const fetchPayoutLimits = async () => {
-		try {
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/payout-limits`, {
-				headers: {
-					'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || 'your-admin-key-here'
-				}
-			});
-
-			if (response.ok) {
-				const data = await response.json();
-				setPayoutLimits(data);
-			} else {
-				console.error('Failed to fetch payout limits');
-			}
-		} catch (error) {
-			console.error('Error fetching payout limits:', error);
-		}
-	};
-
-	const fetchDisbursementHistory = async (page = 1, search = '') => {
-		try {
-			setIsLoadingDisbursements(true);
-
-			const params = new URLSearchParams({
-				page: page.toString(),
-				limit: disbursementPerPage.toString(),
-				search
-			});
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/disbursement-history?${params}`, {
-				headers: {
-					'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || 'your-admin-key-here'
-				}
-			});
-
-			if (response.ok) {
-				const data = await response.json();
-				setDisbursementHistory(data.records || []);
-				setDisbursementPagination(data.pagination || {});
-				setDisbursementStats(data.stats || {});
-				setDisbursementCurrentPage(page);
-
-			} else {
-				showNotification('Failed to load disbursement history', 'error');
-			}
-		} catch (error) {
-			console.error('Error fetching disbursement history:', error);
-			showNotification('Error loading disbursement history', 'error');
-		} finally {
-			setIsLoadingDisbursements(false);
-		}
-	};
-
-	const handleSetPayoutLimit = async () => {
-		if (!newPayoutLimit || parseFloat(newPayoutLimit) <= 0) {
-			showNotification('Please enter a valid disbursement amount greater than 0', 'error');
-			return;
-		}
-
-		if (parseFloat(newPayoutLimit) > 100000) {
-			showNotification('Maximum disbursement amount is $100,000', 'error');
-			return;
-		}
-
-		try {
-			setIsUpdatingLimits(true);
-			showNotification('Setting disbursement...', 'info');
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/payout-limits`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || 'your-admin-key-here'
-				},
-				body: JSON.stringify({
-					totalLimit: parseFloat(newPayoutLimit),
-					fromDate: disbursementFromDate,
-					toDate: disbursementToDate,
-					projectName: projectName.trim() || null,
-					comments: disbursementComments.trim() || null
-				})
-			});
-
-			const data = await response.json();
-
-			if (response.ok && data.success) {
-				showNotification('Disbursement set successfully!', 'success');
-
-				await fetchPayoutLimits();
-				await fetchDisbursementHistory(1, '');
-
-				setNewPayoutLimit('');
-				setProjectName('');
-				setDisbursementComments('');
-			} else {
-				showNotification(data.error || 'Failed to set disbursement', 'error');
-			}
-		} catch (error) {
-			console.error('Error setting disbursement:', error);
-			showNotification('Failed to set disbursement', 'error');
-		} finally {
-			setIsUpdatingLimits(false);
-		}
-	};
-
-	const handleResetPayoutLimits = async () => {
-		const confirmed = window.confirm(
-			'Are you sure you want to reset the payout limits? This will set the used amount back to 0.'
-		);
-
-		if (!confirmed) return;
-
-		try {
-			setIsUpdatingLimits(true);
-			showNotification('Resetting payout limits...', 'info');
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/payout-limits/reset`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'X-Admin-Key': import.meta.env.VITE_ADMIN_KEY || 'your-admin-key-here'
-				}
-			});
-
-			const data = await response.json();
-
-			if (response.ok && data.success) {
-				showNotification('Payout limits reset successfully!', 'success');
-				await fetchPayoutLimits();
-			} else {
-				showNotification(data.error || 'Failed to reset payout limits', 'error');
-			}
-		} catch (error) {
-			console.error('Error resetting payout limits:', error);
-			showNotification('Failed to reset payout limits', 'error');
-		} finally {
-			setIsUpdatingLimits(false);
-		}
-	};
-
-	const handleSearchUsers = async () => {
-		if (!payoutSearchValue.trim()) {
-			showNotification('Please enter a search term', 'error');
-			return;
-		}
-
-		try {
-			setIsSearchingUsers(true);
-			setPayoutSearchResults([]);
-			setSelectedUserForPayout(null);
-
-			console.log('🔍 Searching users:', { method: payoutSearchMethod, value: payoutSearchValue });
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/search-users`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					searchMethod: payoutSearchMethod,
-					searchValue: payoutSearchValue.trim()
-				})
-			});
-
-			const data = await response.json();
-
-			if (response.ok && data.success) {
-				setPayoutSearchResults(data.users || []);
-
-				if (data.users.length === 0) {
-					showNotification('No users found matching your search', 'info');
-				} else {
-					showNotification(`Found ${data.users.length} user(s)`, 'success');
-
-					if (data.users.length === 1) {
-						setSelectedUserForPayout(data.users[0]);
-					}
-				}
-			} else {
-				showNotification(data.error || 'Search failed', 'error');
-			}
-		} catch (error) {
-			console.error('Error searching users:', error);
-			showNotification('Search failed', 'error');
-		} finally {
-			setIsSearchingUsers(false);
-		}
-	};
-
-	const handleRefreshPayoutStatus = async () => {
-		if (!selectedUserForPayout || !selectedUserForPayout.walletAddress) {
-			showNotification('Please select a user first', 'error');
-			return;
-		}
-
-		const walletAddress = selectedUserForPayout.walletAddress;
-
-		try {
-			setIsRefreshingPayouts(true);
-			setRefreshResults(null);
-
-			showNotification(`Checking payout status for ${selectedUserForPayout.name || 'user'}...`, 'info');
-
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/refresh-payout-status/${walletAddress}`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				}
-			});
-
-			const data = await response.json();
-
-			if (response.ok && data.success) {
-				setRefreshResults({
-					...data,
-					userInfo: {
-						name: selectedUserForPayout.name,
-						email: selectedUserForPayout.email,
-						walletAddress: walletAddress
-					}
-				});
-				showNotification(data.message, 'success');
-			} else {
-				showNotification(data.error || 'Failed to refresh payout status', 'error');
-			}
-		} catch (error) {
-			console.error('Error refreshing payout status:', error);
-			showNotification('Failed to refresh payout status', 'error');
-		} finally {
-			setIsRefreshingPayouts(false);
-		}
-	};
-
-	const handleViewProject = (project) => {
-		// Show project details modal
-		console.log('View project:', project);
-	};
-
-	const handleProjectStatus = async (projectId, status) => {
-		try {
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/artist-projects/${projectId}/status`, {
-				method: 'PUT',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({ status })
-			});
-
-			if (response.ok) {
-				showNotification(`Project ${status} successfully`, 'success');
-				fetchArtistProjects(artistProjectsPage, artistProjectsFilter, artistProjectsSearch);
-			} else {
-				const errorData = await response.json();
-				showNotification(errorData.error || `Failed to ${status} project`, 'error');
-			}
-		} catch (error) {
-			console.error(`❌ Error ${status} project:`, error);
-			showNotification(`Failed to ${status} project`, 'error');
-		}
-	};
-
-	const handleRejectProject = async (project) => {
-		const rejectionReason = prompt('Please provide a reason for rejecting this project:');
-
-		if (rejectionReason === null) return; // User cancelled
-
-		if (!rejectionReason.trim()) {
-			showNotification('Please provide a rejection reason', 'error');
-			return;
-		}
-
-		try {
-			const response = await fetch(`https://muse-be.onrender.com/api/admin/artist-projects/${project.id}/status`, {
-				method: 'PUT',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					status: 'rejected',
-					rejectionReason: rejectionReason.trim()
-				})
-			});
-
-			if (response.ok) {
-				showNotification('Project rejected successfully', 'success');
-				fetchArtistProjects(artistProjectsPage, artistProjectsFilter, artistProjectsSearch);
-			} else {
-				const errorData = await response.json();
-				showNotification(errorData.error || 'Failed to reject project', 'error');
-			}
-		} catch (error) {
-			console.error('❌ Error rejecting project:', error);
-			showNotification('Failed to reject project', 'error');
-		}
-	};
-
-	const handleDeleteProject = async (projectId) => {
-		if (window.confirm('Are you sure you want to delete this project? This action cannot be undone.')) {
-			try {
-				const response = await fetch(`https://muse-be.onrender.com/api/admin/artist-projects/${projectId}`, {
-					method: 'DELETE',
-					headers: {
-						'Content-Type': 'application/json',
-					}
-				});
-
-				if (response.ok) {
-					showNotification('Project deleted successfully', 'success');
-					// Refresh the projects list
-					fetchArtistProjects(artistProjectsPage, artistProjectsFilter, artistProjectsSearch);
-				} else {
-					const errorData = await response.json();
-					showNotification(errorData.error || 'Failed to delete project', 'error');
-				}
-			} catch (error) {
-				console.error('❌ Error deleting project:', error);
-				showNotification('Failed to delete project', 'error');
-			}
-		}
-	};
-
-	useEffect(() => {
-		if (address && isOwner) {
-			console.log('🚀 Initializing admin panel data...');
-
-			const initializeData = async () => {
-				try {
-					await Promise.all([
-						fetchPayoutLimits(),
-						fetchDocuments(1, 'all', ''),
-						fetchTaxIdDocuments(1, 'all', ''),
-						fetchDisbursementHistory(1, '')
-					]);
-					console.log('✅ Admin panel data initialized successfully');
-				} catch (error) {
-					console.error('❌ Error initializing admin data:', error);
-					showNotification('Error loading admin data', 'error');
-				}
-			};
-
-			setTimeout(initializeData, 100);
-		}
-	}, [address, isOwner]);
-
-	useEffect(() => {
-		if (address && isOwner && activeTab === 'artists') {
-			// Fetch artist projects when the artists tab becomes active
-			fetchArtistProjects(1, artistProjectsFilter, artistProjectsSearch);
-		}
-	}, [activeTab, address, isOwner]);
-
-	useEffect(() => {
-		if (address && isOwner && currentPage > 0) {
-			const delayedSearch = setTimeout(() => {
-				fetchDocuments(1, documentFilter, searchTerm);
-			}, 500);
-
-			return () => clearTimeout(delayedSearch);
-		}
-	}, [searchTerm, documentFilter]);
-
-	useEffect(() => {
-		if (address && isOwner && taxIdCurrentPage > 0) {
-			const delayedSearch = setTimeout(() => {
-				fetchTaxIdDocuments(1, taxIdFilter, taxIdSearchTerm);
-			}, 500);
-
-			return () => clearTimeout(delayedSearch);
-		}
-	}, [taxIdSearchTerm, taxIdFilter]);
-
-	// Wallet connection functions
-	const shortenAddress = (address: string | undefined) => {
-		if (!address) return "Connect";
-		try {
-			return address.slice(0, 6) + "..." + address.slice(-4);
-		} catch (error) {
-			console.log(error);
-			return "Connect";
-		}
-	};
-
-	const disconnectWallet = () => {
-		disconnect();
-	};
-
-	if (loading) {
-		return <div className="admin-loading">Loading...</div>;
-	}
-
-	if (!isConnected || !address) {
-		return (
-			<div className="admin-connect-wallet">
-				<h2>Admin Panel</h2>
-				<p className='cWallet'>Please connect your wallet to access the admin panel</p>
-				<ConnectButton.Custom>
-					{({ openConnectModal }) => (
-						<button onClick={openConnectModal} className="connect-wallet-btn3">
-							Connect Wallet
-						</button>
-					)}
-				</ConnectButton.Custom>
-			</div>
-		);
-	}
-
-const AUTHORIZED_WALLETS = [
-  '0x8bb8aadc2b1c230548123a22bbe1335cb361d55a' // lowercase version
-];
-
-// Then modify your access check:
-const isAuthorized = isOwner || (address && AUTHORIZED_WALLETS.includes(address.toLowerCase()));
-
-if (!isAuthorized) {
-  return (
-    <div className="admin-not-owner">
-      <h2>Admin Panel</h2>
-      <p className="error-message">You are not authorized to access this panel</p>
-      <p className="cWallet">Connected wallet: {address}</p>
-      <ConnectButton.Custom>
-        {({ account }) => (
-          <button onClick={disconnectWallet} className="disconnect-btn">
-            <i className="fas fa-wallet"></i> {shortenAddress(account?.address)}
-          </button>
-        )}
-      </ConnectButton.Custom>
-    </div>
-  );
-}
-
-	// Tab configuration
-	const tabs = [
-		{ id: 'contract', label: 'Contract Settings', icon: '⚙️' },
-		{ id: 'artists', label: "Artist's Contracts", icon: '🎨' },
-		{ id: 'identity', label: 'Identity Documents', icon: '📄' },
-		{ id: 'taxid', label: 'Tax ID Documents', icon: '🧾' },
-		{ id: 'royalty', label: 'Royalty Management', icon: '💰' },
-		{ id: 'payout', label: 'Payout Status', icon: '💳' }
-	];
-
-	// Render tab content based on active tab
-	const renderTabContent = () => {
-		switch (activeTab) {
-			case 'contract':
-				return (
-					<div className="tab-content">
-						<div className="contract-settings-container">
-							<section className="admin-section contract-settings">
-								<h2>Contract Settings</h2>
-
-								<div className="admin-form-group">
-									<h2 id="h2New">Public Mint Status</h2>
-									<div className="toggle-switch">
-										<input
-											type="checkbox"
-											id="publicMintStatus"
-											checked={publicMintStatus}
-											onChange={(e) => setPublicMintStatusState(e.target.checked)}
-											disabled={activeUpdate !== null}
-										/>
-										<label htmlFor="publicMintStatus" className="toggle-label"></label>
-									</div>
-									<button
-										onClick={handlePublicMintStatusChange}
-										className="admin-submit-btn"
-										disabled={activeUpdate !== null}
-									>
-										{activeUpdate === 'publicMintStatus' ? 'Updating...' : 'Update Status'}
-									</button>
-								</div>
-
-								<div className="admin-form-group">
-									<h2 id="h2New">Max NFTs Per Wallet</h2>
-									<input
-										type="number"
-										min="1"
-										value={maxPerWallet}
-										onChange={(e) => setMaxPerWalletState(Number(e.target.value))}
-										disabled={activeUpdate !== null}
-									/>
-									<button
-										onClick={handleMaxPerWalletChange}
-										className="admin-submit-btn"
-										disabled={activeUpdate !== null}
-									>
-										{activeUpdate === 'maxPerWallet' ? 'Updating...' : 'Update Limit'}
-									</button>
-								</div>
-
-								<section className="admin-form-group">
-									<h2 id="h2New">Airdrop NFT (Specific Token ID to single recipient)</h2>
-									<div className="airdrop-input-group">
-										<label>Receiver Address</label>
-										<input
-											type="text"
-											className="airdrop-input"
-											value={airdropReceiver}
-											onChange={(e) => setAirdropReceiver(e.target.value)}
-											placeholder="0x123..."
-											disabled={isAirdropping}
-										/>
-									</div>
-
-									<div className="airdrop-input-group">
-										<label>Name</label>
-										<input
-											type="text"
-											className="airdrop-input"
-											value={airdropName}
-											onChange={(e) => setAirdropName(e.target.value)}
-											placeholder="John Doe"
-											disabled={isAirdropping}
-										/>
-									</div>
-
-									<div className="airdrop-input-group">
-										<label>Email</label>
-										<input
-											type="email"
-											className="airdrop-input"
-											value={airdropEmail}
-											onChange={(e) => setAirdropEmail(e.target.value)}
-											placeholder="john@email.com"
-											disabled={isAirdropping}
-										/>
-									</div>
-
-									<div className="airdrop-input-group">
-										<label>Token ID</label>
-										<input
-											type="number"
-											className="airdrop-input"
-											value={airdropTokenId}
-											onChange={(e) => setAirdropTokenId(e.target.value)}
-											placeholder="1"
-											min="0"
-											disabled={isAirdropping}
-										/>
-									</div>
-
-									<button
-										onClick={handleAirdrop}
-										className="airdrop-submit-btn"
-										disabled={isAirdropDisabled}
-									>
-										{isWaitingForTx ? 'Confirming Transaction...' :
-											isAirdropping ? 'Processing Airdrop...' :
-												'Execute Airdrop'}
-									</button>
-
-									<div>Total supply - {Number(totalSupply)}</div>
-
-									<p className="airdrop-note">
-										Note: The recipient will receive the NFT with the specified Token ID. Make sure the Token ID doesn't already exist!
-									</p>
-								</section>
-
-								<div className="admin-form-group">
-									<h2 id="h2New">Additional Price (ETH)</h2>
-									<input
-										type="number"
-										step="0.01"
-										min="0"
-										value={additionalPrice}
-										onChange={(e) => setAdditionalPriceState(Number(e.target.value))}
-										disabled={activeUpdate !== null}
-									/>
-									<button
-										onClick={handleAdditionalPriceChange}
-										className="admin-submit-btn"
-										disabled={activeUpdate !== null}
-									>
-										{activeUpdate === 'additionalPrice' ? 'Updating...' : 'Update Price'}
-									</button>
-								</div>
-
-								<div className="admin-form-group">
-									<h2 id="h2New">Base Price (ETH)</h2>
-									<input
-										type="number"
-										step="0.01"
-										min="0"
-										value={basePrice}
-										onChange={(e) => setBasePriceState(Number(e.target.value))}
-										disabled={activeUpdate !== null}
-									/>
-									<button
-										onClick={handleBasePriceChange}
-										className="admin-submit-btn"
-										disabled={activeUpdate !== null}
-									>
-										{activeUpdate === 'basePrice' ? 'Updating...' : 'Update Base Price'}
-									</button>
-									<p className="airdrop-note">
-										This is the price for the first NFT mint per wallet.
-									</p>
-								</div>
-
-								{/* Transfer Ownership Section */}
-								<section className="admin-form-group">
-									<h2 id="h2New">Transfer Ownership</h2>
-									<div className="airdrop-input-group">
-										<label>New Owner Address</label>
-										<input
-											type="text"
-											className="airdrop-input"
-											value={newOwnerAddress}
-											onChange={(e) => setNewOwnerAddress(e.target.value)}
-											placeholder="0x123..."
-											disabled={isTransferring}
-										/>
-									</div>
-
-									<button
-										onClick={handleTransferOwnership}
-										className="admin-submit-btn"
-										disabled={
-											isTransferring ||
-											!newOwnerAddress ||
-											!/^0x[a-fA-F0-9]{40}$/.test(newOwnerAddress)
-										}
-										style={{ backgroundColor: '#dc3545', borderColor: '#dc3545' }}
-									>
-										{isTransferring ? 'Transferring...' : 'Transfer Ownership'}
-									</button>
-
-									<p className="airdrop-note" style={{ color: '#dc3545' }}>
-										⚠️ WARNING: This action is irreversible! You will lose admin access to this contract.
-									</p>
-								</section>
-
-								{/* Withdraw Funds Section */}
-								<section className="admin-form-group">
-									<h2 id="h2New">Withdraw Contract Funds</h2>
-									<div className="contract-info">
-										<p><strong>Contract Balance:</strong> {contractBalance ?
-											(Number(contractBalance) / 1000000000000000000).toFixed(4) : '0'} ETH</p>
-									</div>
-
-									<button
-										onClick={handleWithdraw}
-										className="admin-submit-btn"
-										disabled={isWithdrawing}
-										style={{ backgroundColor: '#28a745', borderColor: '#28a745' }}
-									>
-										{isWithdrawing ? 'Withdrawing...' : 'Withdraw All Funds'}
-									</button>
-
-									<p className="airdrop-note">
-										This will withdraw all ETH from the contract to the owner's wallet.
-									</p>
-								</section>
-
-								<section className="admin-form-group">
-									<h2 id="h2New">Bulk Airdrop (CSV Upload)</h2>
-
-									<div className="airdrop-input-group">
-										<label>Upload CSV File</label>
-										<input
-											type="file"
-											accept=".csv"
-											onChange={handleBulkAirdropFileUpload}
-											disabled={isProcessingBulkAirdrop || !!bulkAirdropTxHash}
-										/>
-										<p className="airdrop-note">
-											CSV format: address,name,email,tokenId<br />
-											Example: 0x123...,John Doe,john@example.com,123
-										</p>
-									</div>
-
-									{isProcessingBulkAirdrop && !bulkAirdropTxHash && (
-										<div className="progress-container">
-											<div className="progress-bar" style={{ width: `${bulkAirdropProgress}%` }}></div>
-											<div className="progress-text">
-												{bulkAirdropProgress < 100 ? 'Processing CSV...' : 'Ready to airdrop'}
-											</div>
-										</div>
-									)}
-
-									{bulkAirdropData.length > 0 && (
-										<div className="airdrop-summary">
-											<p>Ready to airdrop {bulkAirdropData.length} NFTs</p>
-											<div className="airdrop-preview">
-												{bulkAirdropData.slice(0, 3).map((item, index) => (
-													<div key={index} className="airdrop-preview-item">
-														<p>To: {item.address.substring(0, 6)}...{item.address.substring(38)}</p>
-														<p>Name: {item.name}, Email: {item.email.substring(0, 3)}...{item.email.split('@')[1]}</p>
-														<p>Token ID: {item.tokenId}</p>
-													</div>
-												))}
-												{bulkAirdropData.length > 3 && (
-													<p>+ {bulkAirdropData.length - 3} more...</p>
-												)}
-											</div>
-										</div>
-									)}
-
-									<button
-										onClick={handleBulkAirdrop}
-										className="airdrop-submit-btn"
-										disabled={
-											isProcessingBulkAirdrop ||
-											bulkAirdropData.length === 0 ||
-											!!bulkAirdropTxHash
-										}
-									>
-										{bulkAirdropTxHash ? 'Airdrop in progress...' : 'Execute Bulk Airdrop'}
-									</button>
-
-									<p className="airdrop-note">
-										Note: This will airdrop NFTs to multiple addresses at once (max 500 per transaction).
-										Make sure all token IDs are unique and don't already exist.
-									</p>
-								</section>
-							</section>
-
-							<section className="admin-section current-settings">
-								<h2>Current Contract Settings</h2>
-								<div className="contract-info">
-									<p><strong>Contract Address:</strong> {contractABI.address}</p>
-									<p><strong>Public Mint Status:</strong> {currentPublicMintStatus ? 'Enabled' : 'Disabled'}</p>
-									<p><strong>Max Per Wallet:</strong> {currentMaxPerWallet?.toString()}</p>
-									<p><strong>Additional Price:</strong> {currentAdditionalPrice ? (Number(currentAdditionalPrice) / 1000000000000000000) : 0} ETH</p>
-									<p><strong>Base Price:</strong> {currentBasePrice ? (Number(currentBasePrice) / 1000000000000000000) : 0} ETH</p>
-									<p><strong>Contract Balance:</strong> {contractBalance ? (Number(contractBalance) / 1000000000000000000).toFixed(4) : '0'} ETH</p>
-									<p><strong>Total Supply:</strong> {Number(totalSupply) || 0}</p>
-								</div>
-							</section>
-						</div>
-					</div>
-				);
-
-			case 'artists':
-				return (
-					<div className="tab-content full-width">
-						<section className="admin-form-group full-width">
-							<h2 id="h2New">🎨 Artist's Contracts</h2>
-
-							{/* Statistics Dashboard - UNCHANGED */}
-							<div className="document-stats-dashboard">
-								<div className="stat-card total">
-									<div className="stat-number">{artistProjectsStats.total ?? 0}</div>
-									<div className="stat-label">Total Projects</div>
-								</div>
-								<div className="stat-card pending">
-									<div className="stat-number">{artistProjectsStats.pending ?? 0}</div>
-									<div className="stat-label">Pending Review</div>
-								</div>
-								<div className="stat-card approved">
-									<div className="stat-number">{artistProjectsStats.approved ?? 0}</div>
-									<div className="stat-label">Approved</div>
-								</div>
-								<div className="stat-card rejected">
-									<div className="stat-number">{artistProjectsStats.rejected ?? 0}</div>
-									<div className="stat-label">Rejected</div>
-								</div>
-							</div>
-
-							{/* Search and Filter Controls - UNCHANGED */}
-							<div className="document-controls">
-								<div className="search-section">
-									<label>Search Projects</label>
-									<div className="search-input-container">
-										<input
-											type="text"
-											placeholder="Search by project name, symbol, artist name..."
-											value={artistProjectsSearch}
-											onChange={(e) => setArtistProjectsSearch(e.target.value)}
-											className="search-input"
-										/>
-										<button
-											className="search-btn"
-											onClick={() => {
-												setArtistProjectsPage(1);
-												fetchArtistProjects(1, artistProjectsFilter, artistProjectsSearch);
-											}}
-										>
-											<i className="fas fa-search"></i>
-										</button>
-									</div>
-								</div>
-
-								<div className="filter-section">
-									<label>Filter by Status</label>
-									<div className="filter-buttons">
-										{['all', 'pending', 'approved', 'rejected'].map(status => (
-											<button
-												key={status}
-												className={`filter-btn ${artistProjectsFilter === status ? 'active' : ''}`}
-												onClick={() => {
-													setArtistProjectsFilter(status);
-													setArtistProjectsPage(1);
-													fetchArtistProjects(1, status, artistProjectsSearch);
-												}}
-											>
-												{status.charAt(0).toUpperCase() + status.slice(1)}
-												{artistProjectsStats[status as keyof ArtistProjectsStats] !== undefined &&
-													status !== 'all' && ` (${artistProjectsStats[status as keyof ArtistProjectsStats]})`
-												}
-											</button>
-										))}
-									</div>
-								</div>
-							</div>
-
-							{/* Projects Table - SIMPLIFIED */}
-							<div className="documents-table-container">
-								{artistProjectsLoading ? (
-									<div className="documents-loading">
-										<p>Loading artist projects...</p>
-									</div>
-								) : artistProjects.length === 0 ? (
-									<div className="no-documents">
-										<div className="no-documents-icon">🎨</div>
-										<h3>No Artist Projects Found</h3>
-										<p>No projects match your current filters</p>
-										<button
-											className="reload-btn"
-											onClick={() => {
-												setArtistProjectsFilter('all');
-												setArtistProjectsSearch('');
-												setArtistProjectsPage(1);
-												fetchArtistProjects(1, 'all', '');
-											}}
-										>
-											<i className="fas fa-sync-alt"></i> Reload All Projects
-										</button>
-									</div>
-								) : (
-									<>
-										<div className="documents-table artist-projects-table">
-											{/* SIMPLIFIED TABLE HEADERS */}
-											<div className="table-header">
-												<div className="table-cell">Project Image</div>
-												<div className="table-cell">Status</div>
-												<div className="table-cell">Actions</div>
-											</div>
-
-											{artistProjects.map((project, index) => (
-												<div key={project.id || index} className="table-row">
-													{/* Project Image */}
-													<div className="table-cell" data-label="Project Image">
-														<div className="project-image-cell">
-															{project.imageIpfsUrl ? (
-																<img
-																	src={project.imageIpfsUrl}
-																	alt={project.projectName}
-																	className="project-thumbnail"
-																	onError={(e) => {
-																		const target = e.target as HTMLImageElement;
-																		target.style.display = 'none';
-																		target.nextElementSibling?.classList.remove('hidden');
-																	}}
-																/>
-															) : null}
-															<div className="no-image-placeholder hidden">
-																<i className="fas fa-image"></i>
-																<span>No Image</span>
-															</div>
-
-														</div>
-													</div>
-
-													{/* Status */}
-													<div className="table-cell" data-label="Status">
-														<span className={`status-badge ${project.status}`}>
-															{project.status?.charAt(0).toUpperCase() + project.status?.slice(1)}
-														</span>
-													</div>
-
-													{/* Actions */}
-													<div className="table-cell" data-label="Actions">
-														<div className="action-buttons">
-															{/* Details Button */}
-															<button
-																className="action-btn details-btn"
-																onClick={() => setSelectedProject(project)}
-																title="View Project Details"
-															>
-																<i className="fas fa-eye"></i>
-																Details
-															</button>
-
-															{/* Contract Management for pending and approved projects */}
-															{(project.status === 'pending' || project.status === 'approved') && (
-																<AdminContractManagement
-																	project={project}
-																	onUpdate={() => {
-																		fetchArtistProjects(artistProjectsPage, artistProjectsFilter, artistProjectsSearch);
-																	}}
-																/>
-															)}
-														</div>
-													</div>
-												</div>
-											))}
-										</div>
-
-										{/* Pagination - UNCHANGED */}
-										<div className="pagination-container">
-											<div className="pagination-info">
-												Showing {((artistProjectsPage - 1) * 10) + 1} to {Math.min(artistProjectsPage * 10, artistProjectsStats.total || 0)} of {artistProjectsStats.total} projects
-											</div>
-
-											<div className="pagination-controls">
-												<button
-													className="pagination-btn"
-													onClick={() => {
-														setArtistProjectsPage(1);
-														fetchArtistProjects(1, artistProjectsFilter, artistProjectsSearch);
-													}}
-													disabled={artistProjectsPage === 1}
-												>
-													<i className="fas fa-angle-double-left"></i>
-												</button>
-
-												<button
-													className="pagination-btn"
-													onClick={() => {
-														const newPage = artistProjectsPage - 1;
-														setArtistProjectsPage(newPage);
-														fetchArtistProjects(newPage, artistProjectsFilter, artistProjectsSearch);
-													}}
-													disabled={artistProjectsPage === 1}
-												>
-													<i className="fas fa-angle-left"></i>
-												</button>
-
-												<span className="pagination-current">
-													Page {artistProjectsPage}
-												</span>
-
-												<button
-													className="pagination-btn"
-													onClick={() => {
-														const newPage = artistProjectsPage + 1;
-														setArtistProjectsPage(newPage);
-														fetchArtistProjects(newPage, artistProjectsFilter, artistProjectsSearch);
-													}}
-													disabled={artistProjects.length < 10}
-												>
-													<i className="fas fa-angle-right"></i>
-												</button>
-											</div>
-										</div>
-									</>
-								)}
-							</div>
-
-							{/* Project Details Modal */}
-							{selectedProject && (
-								<div className="modal-overlay" onClick={() => setSelectedProject(null)}>
-									<div className="modal-content project-details-modal" onClick={(e) => e.stopPropagation()}>
-										<div className="modal-header">
-											<h3 className="modal-title">Project Details</h3>
-											<button
-												className="modal-close"
-												onClick={() => setSelectedProject(null)}
-											>
-												<i className="fas fa-times"></i>
-											</button>
-										</div>
-
-										<div className="modal-body">
-											<div className="project-details-grid">
-												{/* Project Image */}
-												<div className="detail-section image-section">
-													<h4>Project Image</h4>
-													{selectedProject.imageIpfsUrl ? (
-														<img
-															src={selectedProject.imageIpfsUrl}
-															alt={selectedProject.projectName}
-															className="detail-image"
-															onError={(e) => {
-																const target = e.target as HTMLImageElement;
-																target.src = '/placeholder-image.jpg';
-															}}
-														/>
-													) : (
-														<div className="no-image-large">
-															<i className="fas fa-image"></i>
-															<span>No Image Available</span>
-														</div>
-													)}
-												</div>
-
-												{/* Project Information */}
-												<div className="detail-section info-section">
-													<h4>Project Information</h4>
-													<div className="detail-grid">
-														<div className="detail-item">
-															<label>Project Name:</label>
-															<span className="detail-value">{selectedProject.projectName}</span>
-														</div>
-														<div className="detail-item">
-															<label>Project Symbol:</label>
-															<span className="detail-value symbol">{selectedProject.projectSymbol}</span>
-														</div>
-														<div className="detail-item">
-															<label>Total Supply:</label>
-															<span className="detail-value">{selectedProject.totalSupply?.toLocaleString()}</span>
-														</div>
-														<div className="detail-item">
-															<label>Mint Price:</label>
-															<span className="detail-value price">{selectedProject.mintPrice} POL</span>
-														</div>
-														<div className="detail-item">
-															<label>Status:</label>
-															<span className={`status-badge large ${selectedProject.status}`}>
-																{selectedProject.status?.charAt(0).toUpperCase() + selectedProject.status?.slice(1)}
-															</span>
-														</div>
-													</div>
-												</div>
-
-												{/* Artist Information */}
-												<div className="detail-section artist-section">
-													<h4>Artist Information</h4>
-													<div className="detail-grid">
-														<div className="detail-item">
-															<label>Artist Name:</label>
-															<span className="detail-value">{selectedProject.artistName}</span>
-														</div>
-														<div className="detail-item">
-															<label>Artist Email:</label>
-															<span className="detail-value email">{selectedProject.artistEmail}</span>
-														</div>
-														<div className="detail-item">
-															<label>Artist ID:</label>
-															<span className="detail-value id">{selectedProject.artistId}</span>
-														</div>
-													</div>
-												</div>
-
-												{/* Contract Information */}
-												<div className="detail-section contract-section">
-													<h4>Contract Information</h4>
-													<div className="detail-grid">
-														<div className="detail-item">
-															<label>Contract Owner:</label>
-															<div className="wallet-address-detail">
-																<span className="address">{selectedProject.contractOwner}</span>
-																<button
-																	className="copy-btn"
-																	onClick={() => {
-																		navigator.clipboard.writeText(selectedProject.contractOwner);
-																		// Add toast notification here if available
-																		alert('Address copied to clipboard!');
-																	}}
-																	title="Copy address"
-																>
-																	<i className="fas fa-copy"></i>
-																</button>
-															</div>
-														</div>
-														{selectedProject.contractAddress && (
-															<div className="detail-item">
-																<label>Contract Address:</label>
-																<div className="wallet-address-detail">
-																	<span className="address">{selectedProject.contractAddress}</span>
-																	<button
-																		className="copy-btn"
-																		onClick={() => {
-																			navigator.clipboard.writeText(selectedProject.contractAddress);
-																			alert('Contract address copied to clipboard!');
-																		}}
-																		title="Copy contract address"
-																	>
-																		<i className="fas fa-copy"></i>
-																	</button>
-																</div>
-															</div>
-														)}
-														{selectedProject.networkId && (
-															<div className="detail-item">
-																<label>Network:</label>
-																<span className="detail-value network">{selectedProject.networkId}</span>
-															</div>
-														)}
-													</div>
-												</div>
-
-												{/* Dates */}
-												<div className="detail-section dates-section">
-													<h4>Timeline</h4>
-													<div className="detail-grid">
-														<div className="detail-item">
-															<label>Created:</label>
-															<span className="detail-value">
-																{new Date(selectedProject.createdAt).toLocaleString()}
-															</span>
-														</div>
-														<div className="detail-item">
-															<label>Last Updated:</label>
-															<span className="detail-value">
-																{new Date(selectedProject.updatedAt).toLocaleString()}
-															</span>
-														</div>
-														{selectedProject.rejectionReason && (
-															<div className="detail-item full-width">
-																<label>Rejection Reason:</label>
-																<p className="rejection-reason">{selectedProject.rejectionReason}</p>
-															</div>
-														)}
-													</div>
-												</div>
-											</div>
-										</div>
-
-										<div className="modal-footer">
-											<button
-												className="modal-btn secondary"
-												onClick={() => setSelectedProject(null)}
-											>
-												Close
-											</button>
-											{(selectedProject.status === 'pending' || selectedProject.status === 'approved') && (
-												<AdminContractManagement
-													project={selectedProject}
-													onUpdate={() => {
-														setSelectedProject(null);
-														fetchArtistProjects(artistProjectsPage, artistProjectsFilter, artistProjectsSearch);
-													}}
-												/>
-											)}
-										</div>
-									</div>
-								</div>
-							)}
-						</section>
-					</div>
-				);
-
-			case 'identity':
-				return (
-					<div className="tab-content full-width">
-						<section className="admin-form-group full-width">
-							<h2 id="h2New">📄 Identity Document Management</h2>
-
-							{/* Statistics Dashboard */}
-							<div className="document-stats-dashboard">
-								<div className="stat-card total">
-									<div className="stat-number">{documentStats.total || 0}</div>
-									<div className="stat-label">Total Documents</div>
-								</div>
-								<div className="stat-card pending">
-									<div className="stat-number">{documentStats.pending || 0}</div>
-									<div className="stat-label">Pending Review</div>
-								</div>
-								<div className="stat-card approved">
-									<div className="stat-number">{documentStats.approved || 0}</div>
-									<div className="stat-label">Approved</div>
-								</div>
-								<div className="stat-card rejected">
-									<div className="stat-number">{documentStats.rejected || 0}</div>
-									<div className="stat-label">Rejected</div>
-								</div>
-							</div>
-
-							{/* Search and Filter Controls */}
-							<div className="document-controls">
-								<div className="search-section">
-									<label>Search Documents</label>
-									<div className="search-input-container">
-										<input
-											type="text"
-											placeholder="Search by wallet address, user name, or email..."
-											value={searchTerm}
-											onChange={(e) => setSearchTerm(e.target.value)}
-											className="search-input"
-										/>
-
-										<button
-											className="search-btn"
-											onClick={() => fetchDocuments(1, documentFilter, searchTerm)}
-										>
-											<i className="fas fa-search"></i>
-										</button>
-									</div>
-								</div>
-
-								<div className="filter-section">
-									<label>Filter by Status</label>
-									<div className="filter-buttons">
-										{['all', 'pending', 'approved', 'rejected'].map(status => (
-											<button
-												key={status}
-												className={`filter-btn ${documentFilter === status ? 'active' : ''}`}
-												onClick={() => {
-													setDocumentFilter(status);
-													fetchDocuments(1, status, searchTerm);
-												}}
-											>
-												{status.charAt(0).toUpperCase() + status.slice(1)}
-												{artistProjectsStats[status as keyof ArtistProjectsStats] !== undefined && ` (${artistProjectsStats[status as keyof ArtistProjectsStats]})`}
-											</button>
-										))}
-									</div>
-								</div>
-
-								<div className="per-page-section">
-									<label>Per Page</label>
-									<select
-										value={documentsPerPage}
-										onChange={(e) => {
-											setDocumentsPerPage(parseInt(e.target.value));
-											fetchDocuments(1, documentFilter, searchTerm);
-										}}
-										className="per-page-select"
-									>
-										<option value={5}>5</option>
-										<option value={10}>10</option>
-										<option value={25}>25</option>
-										<option value={50}>50</option>
-									</select>
-								</div>
-							</div>
-
-							{/* Documents Table */}
-							<div className="documents-table-container">
-								{documents.length === 0 ? (
-									<div className="no-documents">
-										<div className="no-documents-icon">📋</div>
-										<h3>No Documents Found</h3>
-										<p>No documents match your current filters</p>
-										<button
-											className="reload-btn"
-											onClick={() => {
-												setDocumentFilter('all');
-												setSearchTerm('');
-												setCurrentPage(1);
-												fetchDocuments(1, 'all', '');
-											}}
-										>
-											<i className="fas fa-sync-alt"></i> Reload All Documents
-										</button>
-									</div>
-								) : (
-									<>
-										<div className="documents-table">
-											<div className="table-header">
-												<div className="table-cell">Document Type</div>
-												<div className="table-cell">User Name</div>
-												<div className="table-cell">Wallet Address</div>
-												<div className="table-cell">Upload Date</div>
-												<div className="table-cell">Status</div>
-												<div className="table-cell">Actions</div>
-											</div>
-
-											{documents.map((document, index) => (
-												<div key={document.id || index} className="table-row">
-													<div className="table-cell" data-label="Document Type">
-														<div className="document-type-cell">
-															<i className="fas fa-id-card"></i>
-															<span>{formatDocumentType(document.documentType)}</span>
-														</div>
-													</div>
-
-													<div className="table-cell" data-label="User Name">
-														<div className="user-name-cell">
-															<span className="user-name">
-																{document.userName || 'Unknown'}
-															</span>
-														</div>
-													</div>
-
-													<div className="table-cell" data-label="Wallet Address">
-														<div className="wallet-address-cell-container">
-															<span className="wallet-address-cell">
-																{document.walletAddress.substring(0, 8)}...{document.walletAddress.substring(34)}
-															</span>
-															<button
-																className="copy-wallet-btn"
-																onClick={() => handleCopyWallet(document.walletAddress)}
-																title="Copy full wallet address"
-															>
-																{copiedWallet === document.walletAddress ? (
-																	<i className="fas fa-check"></i>
-																) : (
-																	<i className="fas fa-copy"></i>
-																)}
-															</button>
-														</div>
-													</div>
-
-													<div className="table-cell" data-label="Upload Date">
-														<span className="date-cell">
-															{new Date(document.uploadedAt).toLocaleDateString()}
-														</span>
-													</div>
-
-													<div className="table-cell" data-label="Status">
-														<span className={`status-badge ${document.verified ? 'approved' : document.rejectionReason ? 'rejected' : 'pending'}`}>
-															{document.verified ? 'Approved' : document.rejectionReason ? 'Rejected' : 'Pending'}
-														</span>
-													</div>
-
-													<div className="table-cell" data-label="Actions">
-														<button
-															className="review-btn"
-															onClick={() => openDocumentModal(document)}
-														>
-															<i className="fas fa-eye"></i> Review
-														</button>
-													</div>
-												</div>
-											))}
-										</div>
-
-										{/* Pagination */}
-										<div className="pagination-container">
-											<div className="pagination-info">
-												Showing {((currentPage - 1) * documentsPerPage) + 1} to {Math.min(currentPage * documentsPerPage, pagination.totalDocuments || 0)} of {pagination.totalDocuments} documents
-											</div>
-
-											<div className="pagination-controls">
-												<button
-													className="pagination-btn"
-													onClick={() => fetchDocuments(1, documentFilter, searchTerm)}
-													disabled={!pagination.hasPrevPage}
-												>
-													<i className="fas fa-angle-double-left"></i>
-												</button>
-
-												<button
-													className="pagination-btn"
-													onClick={() => fetchDocuments(currentPage - 1, documentFilter, searchTerm)}
-													disabled={!pagination.hasPrevPage}
-												>
-													<i className="fas fa-angle-left"></i>
-												</button>
-
-												<span className="pagination-current">
-													Page {currentPage} of {pagination.totalPages}
-												</span>
-
-												<button
-													className="pagination-btn"
-													onClick={() => fetchDocuments(currentPage + 1, documentFilter, searchTerm)}
-													disabled={!pagination.hasNextPage}
-												>
-													<i className="fas fa-angle-right"></i>
-												</button>
-
-												<button
-													className="pagination-btn"
-													onClick={() => fetchDocuments(pagination.totalPages || 1, documentFilter, searchTerm)}
-													disabled={!pagination.hasNextPage}
-												>
-													<i className="fas fa-angle-double-right"></i>
-												</button>
-											</div>
-										</div>
-									</>
-								)}
-							</div>
-						</section>
-					</div>
-				);
-
-			case 'taxid':
-				return (
-					<div className="tab-content full-width">
-						<section className="admin-form-group full-width">
-							<h2 id="h2New">🧾 Tax ID Document Management</h2>
-
-							{/* Statistics Dashboard */}
-							{/* Statistics Dashboard */}
-							<div className="document-stats-dashboard">
-								<div className="stat-card total">
-									<div className="stat-number">{artistProjectsStats.total ?? 0}</div>
-									<div className="stat-label">Total Projects</div>
-								</div>
-								<div className="stat-card pending">
-									<div className="stat-number">{artistProjectsStats.pending ?? 0}</div>
-									<div className="stat-label">Pending Review</div>
-								</div>
-								<div className="stat-card approved">
-									<div className="stat-number">{artistProjectsStats.approved ?? 0}</div>
-									<div className="stat-label">Approved</div>
-								</div>
-								<div className="stat-card rejected">
-									<div className="stat-number">{artistProjectsStats.rejected ?? 0}</div>
-									<div className="stat-label">Rejected</div>
-								</div>
-							</div>
-
-							{/* Search and Filter Controls */}
-							<div className="document-controls">
-								<div className="search-section">
-									<label>Search Tax ID Documents</label>
-									<div className="search-input-container">
-										<input
-											type="text"
-											placeholder="Search by wallet address, user name, or email..."
-											value={taxIdSearchTerm}
-											onChange={(e) => setTaxIdSearchTerm(e.target.value)}
-											className="search-input"
-										/>
-										<button
-											className="search-btn"
-											onClick={() => fetchTaxIdDocuments(1, taxIdFilter, taxIdSearchTerm)}
-										>
-											<i className="fas fa-search"></i>
-										</button>
-									</div>
-								</div>
-
-								<div className="filter-section">
-									<label>Filter by Status</label>
-									<div className="filter-buttons">
-										{['all', 'pending', 'approved', 'rejected'].map(status => (
-											<button
-												key={status}
-												className={`filter-btn ${taxIdFilter === status ? 'active' : ''}`}
-												onClick={() => {
-													setTaxIdFilter(status);
-													fetchTaxIdDocuments(1, status, taxIdSearchTerm);
-												}}
-											>
-												{status.charAt(0).toUpperCase() + status.slice(1)}
-												{taxIdStats[status as keyof DocumentStats] !== undefined && ` (${taxIdStats[status as keyof DocumentStats]})`}
-											</button>
-										))}
-									</div>
-								</div>
-
-								<div className="per-page-section">
-									<label>Per Page</label>
-									<select
-										value={documentsPerPage}
-										onChange={(e) => {
-											setDocumentsPerPage(parseInt(e.target.value));
-											fetchTaxIdDocuments(1, taxIdFilter, taxIdSearchTerm);
-										}}
-										className="per-page-select"
-									>
-										<option value={5}>5</option>
-										<option value={10}>10</option>
-										<option value={25}>25</option>
-										<option value={50}>50</option>
-									</select>
-								</div>
-							</div>
-
-							{/* Tax ID Documents Table */}
-							<div className="documents-table-container">
-								{taxIdDocuments.length === 0 ? (
-									<div className="no-documents">
-										<div className="no-documents-icon">🧾</div>
-										<h3>No Tax ID Documents Found</h3>
-										<p>No tax ID documents match your current filters</p>
-										<button
-											className="reload-btn"
-											onClick={() => {
-												setTaxIdFilter('all');
-												setTaxIdSearchTerm('');
-												setTaxIdCurrentPage(1);
-												fetchTaxIdDocuments(1, 'all', '');
-											}}
-										>
-											<i className="fas fa-sync-alt"></i> Reload All Tax ID Documents
-										</button>
-									</div>
-								) : (
-									<>
-										<div className="documents-table">
-											<div className="table-header">
-												<div className="table-cell">Document Type</div>
-												<div className="table-cell">User Name</div>
-												<div className="table-cell">Wallet Address</div>
-												<div className="table-cell">Upload Date</div>
-												<div className="table-cell">Status</div>
-												<div className="table-cell">Actions</div>
-											</div>
-
-											{taxIdDocuments.map((document, index) => (
-												<div key={document.id || index} className="table-row">
-													<div className="table-cell" data-label="Document Type">
-														<div className="document-type-cell">
-															<i className="fas fa-file-invoice-dollar"></i>
-															<span>{formatTaxIdType(document.taxIdType)}</span>
-														</div>
-													</div>
-
-													<div className="table-cell" data-label="User Name">
-														<div className="user-name-cell">
-															<span className="user-name">
-																{document.userName || 'Unknown'}
-															</span>
-														</div>
-													</div>
-
-													<div className="table-cell" data-label="Wallet Address">
-														<div className="wallet-address-cell-container">
-															<span className="wallet-address-cell">
-																{document.walletAddress.substring(0, 8)}...{document.walletAddress.substring(34)}
-															</span>
-															<button
-																className="copy-wallet-btn"
-																onClick={() => handleCopyWallet(document.walletAddress)}
-																title="Copy full wallet address"
-															>
-																{copiedWallet === document.walletAddress ? (
-																	<i className="fas fa-check"></i>
-																) : (
-																	<i className="fas fa-copy"></i>
-																)}
-															</button>
-														</div>
-													</div>
-
-													<div className="table-cell" data-label="Upload Date">
-														<span className="date-cell">
-															{new Date(document.uploadedAt).toLocaleDateString()}
-														</span>
-													</div>
-
-													<div className="table-cell" data-label="Status">
-														<span className={`status-badge ${document.verified ? 'approved' : document.rejectionReason ? 'rejected' : 'pending'}`}>
-															{document.verified ? 'Approved' : document.rejectionReason ? 'Rejected' : 'Pending'}
-														</span>
-													</div>
-
-													<div className="table-cell" data-label="Actions">
-														<button
-															className="review-btn"
-															onClick={() => {
-																setSelectedTaxIdDocument(document);
-																setShowTaxIdModal(true);
-															}}
-														>
-															<i className="fas fa-eye"></i> Review
-														</button>
-													</div>
-												</div>
-											))}
-
-										</div>
-
-										{/* Pagination */}
-										<div className="pagination-container">
-											<div className="pagination-info">
-												Showing {((taxIdCurrentPage - 1) * documentsPerPage) + 1} to {Math.min(taxIdCurrentPage * documentsPerPage, taxIdPagination.totalDocuments || 0)} of {taxIdPagination.totalDocuments} tax ID documents
-											</div>
-
-											<div className="pagination-controls">
-												<button
-													className="pagination-btn"
-													onClick={() => fetchTaxIdDocuments(1, taxIdFilter, taxIdSearchTerm)}
-													disabled={!taxIdPagination.hasPrevPage}
-												>
-													<i className="fas fa-angle-double-left"></i>
-												</button>
-
-												<button
-													className="pagination-btn"
-													onClick={() => fetchTaxIdDocuments(taxIdCurrentPage - 1, taxIdFilter, taxIdSearchTerm)}
-													disabled={!taxIdPagination.hasPrevPage}
-												>
-													<i className="fas fa-angle-left"></i>
-												</button>
-
-												<span className="pagination-current">
-													Page {taxIdCurrentPage} of {taxIdPagination.totalPages}
-												</span>
-
-												<button
-													className="pagination-btn"
-													onClick={() => fetchTaxIdDocuments(taxIdCurrentPage + 1, taxIdFilter, taxIdSearchTerm)}
-													disabled={!taxIdPagination.hasNextPage}
-												>
-													<i className="fas fa-angle-right"></i>
-												</button>
-
-												<button
-													className="pagination-btn"
-													onClick={() => fetchTaxIdDocuments(taxIdPagination.totalPages || 1, taxIdFilter, taxIdSearchTerm)}
-													disabled={!taxIdPagination.hasNextPage}
-												>
-													<i className="fas fa-angle-double-right"></i>
-												</button>
-											</div>
-										</div>
-									</>
-								)}
-							</div>
-						</section>
-					</div>
-				);
-
-			case 'royalty':
-				return (
-					<div className="tab-content full-width">
-						<div className="contract-settings-container">
-							<section className="admin-section royalty-settings">
-								<h2 id="h2New">💰 Royalty Management</h2>
-
-								{/* Set New Disbursement */}
-								<div className="airdrop-input-group">
-									<label>Disbursement Amount ($)</label>
-									<input
-										type="number"
-										step="0.01"
-										min="0"
-										max="100000"
-										className="airdrop-input"
-										value={newPayoutLimit}
-										onChange={(e) => setNewPayoutLimit(e.target.value)}
-										placeholder="Enter disbursement amount (e.g., 10000)"
-										disabled={isUpdatingLimits}
-									/>
-								</div>
-
-								<div className="airdrop-input-group">
-									<label>Disbursement Period - From Date</label>
-									<input
-										type="date"
-										className="airdrop-input"
-										value={disbursementFromDate}
-										onChange={(e) => setDisbursementFromDate(e.target.value)}
-										disabled={isUpdatingLimits}
-										required
-									/>
-								</div>
-
-								<div className="airdrop-input-group">
-									<label>Disbursement Period - To Date</label>
-									<input
-										type="date"
-										className="airdrop-input"
-										value={disbursementToDate}
-										onChange={(e) => setDisbursementToDate(e.target.value)}
-										disabled={isUpdatingLimits}
-										required
-									/>
-								</div>
-
-								<div className="airdrop-input-group">
-									<label>Project Name</label>
-									<input
-										type="text"
-										className="airdrop-input"
-										value={projectName}
-										onChange={(e) => setProjectName(e.target.value)}
-										placeholder="Enter project name (e.g., Hope KK NFT, Music Royalties)"
-										disabled={isUpdatingLimits}
-									/>
-								</div>
-
-								<div className="airdrop-input-group">
-									<label>Comments (Optional)</label>
-									<textarea
-										className="airdrop-input"
-										value={disbursementComments}
-										onChange={(e) => setDisbursementComments(e.target.value)}
-										placeholder="Add comments about this disbursement..."
-										rows={3} // Change from rows="3" to rows={3}
-										disabled={isUpdatingLimits}
-									/>
-								</div>
-
-								{/* Action Buttons */}
-								<div className="limits-actions">
-									<button
-										onClick={handleSetPayoutLimit}
-										className="admin-submit-btn"
-										disabled={isUpdatingLimits || !newPayoutLimit || !disbursementFromDate || !disbursementToDate}
-										style={{ backgroundColor: '#28a745', borderColor: '#28a745', marginRight: '10px' }}
-									>
-										{isUpdatingLimits ? (
-											<>
-												<i className="fas fa-spinner fa-spin"></i> Processing...
-											</>
-										) : (
-											<>
-												<i className="fas fa-check"></i> Set Disbursement
-											</>
-										)}
-									</button>
-
-									{payoutLimits.isSet && (
-										<button
-											onClick={handleResetPayoutLimits}
-											className="admin-submit-btn"
-											disabled={isUpdatingLimits}
-											style={{ backgroundColor: '#ffc107', borderColor: '#ffc107' }}
-										>
-											{isUpdatingLimits ? (
-												<>
-													<i className="fas fa-spinner fa-spin"></i> Resetting...
-												</>
-											) : (
-												<>
-													<i className="fas fa-redo"></i> Reset Used Amount
-												</>
-											)}
-										</button>
-									)}
-								</div>
-
-								{/* Instructions */}
-								<div className="limits-instructions" style={{
-									padding: '15px',
-									marginTop: '15px',
-									backgroundColor: '#f8f9fa',
-									border: '1px solid #dee2e6',
-									borderRadius: '5px'
-								}}>
-									<h4>💡 How Disbursements Work:</h4>
-									<ul>
-										<li><strong>Disbursement Amount:</strong> Total amount available for user withdrawals in this period</li>
-										<li><strong>Period:</strong> Time frame for this disbursement (quarterly or monthly)</li>
-										<li><strong>Comments:</strong> Internal notes about this disbursement</li>
-										<li><strong>Reset:</strong> Resets the "Used" amount back to 0 without changing the total limit</li>
-										<li><strong>Security:</strong> Prevents unlimited withdrawals and helps manage cash flow</li>
-									</ul>
-
-									<div style={{ marginTop: '10px', padding: '10px', backgroundColor: '#fff3cd', borderRadius: '5px' }}>
-										<strong>⚠️ Important:</strong> Users cannot withdraw if limits are not set or if the remaining limit is $0.
-									</div>
-								</div>
-							</section>
-
-							<section className="admin-section disbursement-records">
-								<h2>Disbursement History</h2>
-
-								{/* Search and Filter Controls */}
-								<div className="disbursement-controls">
-									<div className="search-section">
-										<label>Search Records</label>
-										<div className="search-input-container">
-											<input
-												type="text"
-												placeholder="Search by period, comments..."
-												value={disbursementSearchTerm}
-												onChange={(e) => setDisbursementSearchTerm(e.target.value)}
-												className="search-input"
-											/>
-											<button
-												className="search-btn"
-												onClick={() => fetchDisbursementHistory(1, disbursementSearchTerm)}
-											>
-												<i className="fas fa-search"></i>
-											</button>
-										</div>
-									</div>
-
-									<div className="per-page-section">
-										<label>Per Page</label>
-										<select
-											value={disbursementPerPage}
-											onChange={(e) => {
-												setDisbursementPerPage(parseInt(e.target.value));
-												fetchDisbursementHistory(1, disbursementSearchTerm);
-											}}
-											className="per-page-select"
-										>
-											<option value={5}>5</option>
-											<option value={10}>10</option>
-											<option value={25}>25</option>
-										</select>
-									</div>
-								</div>
-
-								{/* Disbursement Records Table */}
-								<div className="disbursement-table-container">
-									{isLoadingDisbursements ? (
-										<div className="documents-loading">
-											<p>Loading disbursement records...</p>
-										</div>
-									) : disbursementHistory.length === 0 ? (
-										<div className="no-documents">
-											<div className="no-documents-icon">💰</div>
-											<h3>No Disbursement Records</h3>
-											<p>No disbursement records found</p>
-											<button
-												className="reload-btn"
-												onClick={() => {
-													setDisbursementSearchTerm('');
-													setDisbursementCurrentPage(1);
-													fetchDisbursementHistory(1, '');
-												}}
-											>
-												<i className="fas fa-sync-alt"></i> Reload All Records
-											</button>
-										</div>
-									) : (
-										<>
-											<div className="disbursement-table">
-												<div className="table-header">
-													<div className="table-cell">Date</div>
-													<div className="table-cell">Period (From - To)</div>
-													<div className="table-cell">Amount ($)</div>
-													<div className="table-cell">Status</div>
-													<div className="table-cell">Comments</div>
-												</div>
-
-												{disbursementHistory.map((record, index) => (
-													<div key={record.id || index} className="table-row">
-														<div className="table-cell">
-															<span className="date-cell">
-																{new Date(record.createdAt).toLocaleDateString()}
-															</span>
-														</div>
-
-														<div className="table-cell">
-															<span className="period-cell">
-																{record.fromDate && record.toDate ?
-																	`${new Date(record.fromDate).toLocaleDateString()} - ${new Date(record.toDate).toLocaleDateString()}` :
-																	'N/A'
-																}
-															</span>
-														</div>
-														<div className="table-cell">
-															<span className="amount-cell">
-																${record.totalLimit?.toLocaleString() || '0'}
-															</span>
-														</div>
-
-														<div className="table-cell">
-															<span className={`status-badge ${record.isActive ? 'active' : 'inactive'}`}>
-																{record.isActive ? 'Active' : 'Completed'}
-															</span>
-														</div>
-
-														<div className="table-cell">
-															<span className="comments-cell" title={record.comments}>
-																{record.comments ? (record.comments.length > 30 ? record.comments.substring(0, 30) + '...' : record.comments) : 'No comments'}
-															</span>
-														</div>
-													</div>
-												))}
-											</div>
-
-											{/* Pagination */}
-											{disbursementPagination.totalPages && disbursementPagination.totalPages > 1 && (
-												<div className="pagination-container">
-													<div className="pagination-info">
-														Showing {((disbursementCurrentPage - 1) * disbursementPerPage) + 1} to {Math.min(disbursementCurrentPage * disbursementPerPage, disbursementPagination.totalRecords || 0)} of {disbursementPagination.totalRecords} records
-													</div>
-
-													<div className="pagination-controls">
-														<button
-															className="pagination-btn"
-															onClick={() => fetchDisbursementHistory(1, disbursementSearchTerm)}
-															disabled={!disbursementPagination.hasPrevPage}
-														>
-															<i className="fas fa-angle-double-left"></i>
-														</button>
-
-														<button
-															className="pagination-btn"
-															onClick={() => fetchDisbursementHistory(disbursementCurrentPage - 1, disbursementSearchTerm)}
-															disabled={!disbursementPagination.hasPrevPage}
-														>
-															<i className="fas fa-angle-left"></i>
-														</button>
-
-														<span className="pagination-current">
-															Page {disbursementCurrentPage} of {disbursementPagination.totalPages}
-														</span>
-
-														<button
-															className="pagination-btn"
-															onClick={() => fetchDisbursementHistory(disbursementCurrentPage + 1, disbursementSearchTerm)}
-															disabled={!disbursementPagination.hasNextPage}
-														>
-															<i className="fas fa-angle-right"></i>
-														</button>
-
-														<button
-															className="pagination-btn"
-															onClick={() => fetchDisbursementHistory(disbursementPagination.totalPages || 1, disbursementSearchTerm)}
-															disabled={!disbursementPagination.hasNextPage}
-														>
-															<i className="fas fa-angle-double-right"></i>
-														</button>
-													</div>
-												</div>
-											)}
-										</>
-									)}
-								</div>
-
-								{/* Summary Statistics */}
-								<div className="disbursement-summary" style={{
-									padding: '15px',
-									marginTop: '20px',
-									backgroundColor: '#f8f9fa',
-									border: '1px solid #dee2e6',
-									borderRadius: '5px'
-								}}>
-									<h4>📊 Summary Statistics:</h4>
-									<div className="summary-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px' }}>
-										<div>
-											<strong>Total Disbursements:</strong> {disbursementStats.totalDisbursements || 0}
-										</div>
-										<div>
-											<strong>Total Amount Disbursed:</strong> ${disbursementStats.totalAmountDisbursed?.toLocaleString() || '0'}
-										</div>
-										<div>
-											<strong>Total Amount Used:</strong> ${disbursementStats.totalAmountUsed?.toLocaleString() || '0'}
-										</div>
-										<div>
-											<strong>Active Disbursements:</strong> {disbursementStats.activeDisbursements || 0}
-										</div>
-									</div>
-								</div>
-							</section>
-						</div>
-					</div>
-				);
-
-			case 'payout':
-				return (
-					<div className="tab-content full-width">
-						<section className="admin-form-group full-width">
-							<h2 id="h2New">💳 Payout Status Management</h2>
-
-							{/* Enhanced Search Section */}
-							<div className="enhanced-search-section">
-								<div className="search-method-selector">
-									<label>Search By:</label>
-									<div className="search-method-buttons">
-										<button
-											className={`method-btn ${payoutSearchMethod === 'wallet' ? 'active' : ''}`}
-											onClick={() => {
-												setPayoutSearchMethod('wallet');
-												setPayoutSearchValue('');
-												setPayoutSearchResults([]);
-												setSelectedUserForPayout(null);
-											}}
-										>
-											<i className="fas fa-wallet"></i> Wallet Address
-										</button>
-										<button
-											className={`method-btn ${payoutSearchMethod === 'name' ? 'active' : ''}`}
-											onClick={() => {
-												setPayoutSearchMethod('name');
-												setPayoutSearchValue('');
-												setPayoutSearchResults([]);
-												setSelectedUserForPayout(null);
-											}}
-										>
-											<i className="fas fa-user"></i> Name
-										</button>
-										<button
-											className={`method-btn ${payoutSearchMethod === 'email' ? 'active' : ''}`}
-											onClick={() => {
-												setPayoutSearchMethod('email');
-												setPayoutSearchValue('');
-												setPayoutSearchResults([]);
-												setSelectedUserForPayout(null);
-											}}
-										>
-											<i className="fas fa-envelope"></i> Email
-										</button>
-									</div>
-								</div>
-
-								<div className="airdrop-input-group">
-									<label>
-										{payoutSearchMethod === 'wallet' ? 'Wallet Address' :
-											payoutSearchMethod === 'name' ? 'User Name' : 'Email Address'}
-									</label>
-									<div className="search-input-container">
-										<input
-											type="text"
-											className="airdrop-input"
-											value={payoutSearchValue}
-											onChange={(e) => setPayoutSearchValue(e.target.value)}
-											placeholder={
-												payoutSearchMethod === 'wallet' ? '0x123...' :
-													payoutSearchMethod === 'name' ? 'Enter user name...' :
-														'Enter email address...'
-											}
-											disabled={isRefreshingPayouts || isSearchingUsers}
-										/>
-										<button
-											className="search-btn"
-											onClick={handleSearchUsers}
-											disabled={isRefreshingPayouts || isSearchingUsers || !payoutSearchValue.trim()}
-										>
-											{isSearchingUsers ? (
-												<i className="fas fa-spinner fa-spin"></i>
-											) : (
-												<i className="fas fa-search"></i>
-											)}
-										</button>
-									</div>
-								</div>
-
-								{/* Search Results */}
-								{payoutSearchResults.length > 0 && (
-									<div className="search-results-container">
-										<h4>Search Results ({payoutSearchResults.length} found):</h4>
-										<div className="search-results-grid">
-											{payoutSearchResults.map((user, index) => (
-												<div
-													key={user.walletAddress || index}
-													className={`user-result-card ${selectedUserForPayout?.walletAddress === user.walletAddress ? 'selected' : ''}`}
-													onClick={() => {
-														console.log('User selected:', user);
-														setSelectedUserForPayout(user);
-													}}
-												>
-													<div className="user-info">
-														<div className="user-name">
-															<i className="fas fa-user"></i>
-															<strong>{user.name || 'Anonymous'}</strong>
-														</div>
-														<div className="user-email">
-															<i className="fas fa-envelope"></i>
-															{user.email || 'No email'}
-														</div>
-														<div className="user-wallet">
-															<i className="fas fa-wallet"></i>
-															<span className="wallet-short">
-																{user.walletAddress ?
-																	`${user.walletAddress.substring(0, 8)}...${user.walletAddress.substring(34)}` :
-																	'No wallet'
-																}
-															</span>
-														</div>
-														<div className="user-tokens">
-															<i className="fas fa-coins"></i>
-															{user.totalMinted || 0} tokens
-														</div>
-													</div>
-													{selectedUserForPayout?.walletAddress === user.walletAddress && (
-														<div className="selected-indicator">
-															<i className="fas fa-check-circle"></i>
-														</div>
-													)}
-												</div>
-											))}
-										</div>
-									</div>
-								)}
-
-							</div>
-
-							{/* Refresh Status Button */}
-							<button
-								onClick={handleRefreshPayoutStatus}
-								className="admin-submit-btn"
-								disabled={
-									isRefreshingPayouts ||
-									!selectedUserForPayout ||
-									!selectedUserForPayout.walletAddress ||
-									selectedUserForPayout.walletAddress.trim() === ''
-								}
-								style={{ backgroundColor: '#17a2b8', borderColor: '#17a2b8' }}
-							>
-								{isRefreshingPayouts ? (
-									<>
-										<i className="fas fa-spinner fa-spin"></i> Checking Status...
-									</>
-								) : (
-									<>
-										<i className="fas fa-sync-alt"></i> Refresh Payout Status
-									</>
-								)}
-							</button>
-
-							{refreshResults && (
-								<div className="refresh-results" style={{
-									padding: '15px',
-									marginTop: '15px',
-									backgroundColor: '#f8f9fa',
-									border: '1px solid #dee2e6',
-									borderRadius: '5px'
-								}}>
-									<h4>Refresh Results:</h4>
-									<pre>{JSON.stringify(refreshResults, null, 2)}</pre>
-								</div>
-							)}
-
-							<p className="airdrop-note">
-								Search for users by name, email, or wallet address, then refresh their payout status with PayPal.
-								Use this when users report their withdrawals are stuck as "pending".
-							</p>
-
-							<div className="payout-instructions" style={{
-								padding: '15px',
-								marginTop: '15px',
-								backgroundColor: '#f8f9fa',
-								border: '1px solid #dee2e6',
-								borderRadius: '5px'
-							}}>
-								<h4>💡 How Enhanced Payout Status Works:</h4>
-								<ul>
-									<li><strong>Multi-Search:</strong> Find users by name, email, or wallet address</li>
-									<li><strong>User Selection:</strong> Click on a user card to select them for status refresh</li>
-									<li><strong>Status Check:</strong> Queries PayPal for the latest status of pending payouts</li>
-									<li><strong>Database Sync:</strong> Updates the local database with PayPal's records</li>
-									<li><strong>Issue Resolution:</strong> Helps resolve stuck or delayed payout statuses</li>
-								</ul>
-
-								<div style={{ marginTop: '10px', padding: '10px', backgroundColor: '#d1ecf1', borderRadius: '5px' }}>
-									<strong>ℹ️ Note:</strong> Only use this for users with reported payout issues. Frequent checking may trigger rate limits.
-								</div>
-							</div>
-						</section>
-					</div>
-				);
-
-			default:
-				return <div>Tab not found</div>;
-		}
-	};
-
-	return (
-		<div className="admin-container">
-			<header className="admin-header">
-				<h1>MuseCoinX Admin Panel</h1>
-				<div className="wallet-info">
-					<ConnectButton.Custom>
-						{({ openConnectModal, account }) => {
-							const connected = !!account;
-
-							return connected ? (
-								<button
-									className="connect-wallet-btn"
-									onClick={disconnectWallet}
-								>
-									<i className="fas fa-wallet"></i> {shortenAddress(account.address)}
-								</button>
-							) : (
-								<button
-									className="connect-wallet-btn"
-									onClick={openConnectModal}
-								>
-									<i className="fas fa-wallet"></i> Connect Wallet
-								</button>
-							);
-						}}
-					</ConnectButton.Custom>
-				</div>
-			</header>
-
-			{/* Tab Navigation */}
-			<div className="admin-tabs">
-				<div className="tab-nav">
-					{tabs.map(tab => (
-						<button
-							key={tab.id}
-							className={`tab-btn ${activeTab === tab.id ? 'active' : ''}`}
-							onClick={() => setActiveTab(tab.id)}
-						>
-							<span className="tab-icon">{tab.icon}</span>
-							<span className="tab-label">{tab.label}</span>
-						</button>
-					))}
-				</div>
-			</div>
-
-			{renderTabContent()}
-
-			{/* Notification */}
-			{notification && (
-				<div>
-					<div className={`notificationA ${notification.type}`}>
-						{notification.message}
-					</div>
-				</div>
-			)}
-
-			{/* Tax ID Document Review Modal */}
-			{showTaxIdModal && selectedTaxIdDocument && (
-				<div className="document-modal-overlay">
-					<div className="document-modal">
-						<div className="document-modal-header">
-							<h3>Review Tax ID Document</h3>
-							<button
-								className="close-modal-btn"
-								onClick={() => {
-									setShowTaxIdModal(false);
-									setSelectedTaxIdDocument(null);
-								}}
-								style={{
-									position: 'absolute',
-									right: '15px',
-									top: '15px',
-									background: 'none',
-									border: 'none',
-									fontSize: '20px',
-									cursor: 'pointer',
-									color: '#666'
-								}}
-							>
-								✕
-							</button>
-						</div>
-
-						<div className="document-modal-body">
-							<div className="document-details">
-								<div className="detail-row">
-									<strong>Document Type:</strong>
-									<span>{formatTaxIdType(selectedTaxIdDocument.taxIdType)}</span>
-								</div>
-								<div className="detail-row">
-									<strong>Wallet Address:</strong>
-									<span className="wallet-address">{selectedTaxIdDocument.walletAddress}</span>
-								</div>
-								<div className="detail-row">
-									<strong>Upload Date:</strong>
-									<span>{new Date(selectedTaxIdDocument.uploadedAt).toLocaleString()}</span>
-								</div>
-								{selectedTaxIdDocument.rejectionReason && (
-									<div className="detail-row">
-										<strong>Previous Rejection:</strong>
-										<span className="rejection-reason">{selectedTaxIdDocument.rejectionReason}</span>
-									</div>
-								)}
-							</div>
-
-							<div className="document-image-container">
-								<img
-									src={selectedTaxIdDocument.ipfsUrl}
-									alt="Tax ID Document"
-									className="document-image"
-									onError={(e) => {
-										const target = e.target as HTMLImageElement;
-										target.style.display = 'none';
-										const nextSibling = target.nextElementSibling as HTMLElement;
-										if (nextSibling) {
-											nextSibling.style.display = 'block';
-										}
-									}}
-								/>
-								<div className="image-error" style={{ display: 'none' }}>
-									<i className="fas fa-exclamation-triangle"></i>
-									<p>Unable to load tax ID document image</p>
-									<a href={selectedTaxIdDocument.ipfsUrl} target="_blank" rel="noopener noreferrer">
-										View in new tab
-									</a>
-								</div>
-							</div>
-
-							<div className="document-verification-guidelines">
-								<h4>Tax ID Verification Guidelines:</h4>
-								<ul>
-									<li>✓ Document should be clear and readable</li>
-									<li>✓ Tax identification numbers should be visible</li>
-									<li>✓ No glare or shadows obscuring text</li>
-									<li>✓ Document should appear authentic</li>
-									<li>✓ Personal information can be partially redacted for security</li>
-								</ul>
-							</div>
-						</div>
-
-						<div className="document-modal-footer">
-							<button
-								className="reject-btn"
-								onClick={() => {
-									setShowTaxIdModal(false);
-									setShowTaxIdRejectionModal(true);
-								}}
-								disabled={isVerifyingTaxId}
-							>
-								<i className="fas fa-times-circle"></i>
-								Reject Document
-							</button>
-							<button
-								className="approve-btn"
-								onClick={() => handleVerifyTaxIdDocument(selectedTaxIdDocument.walletAddress, true)}
-								disabled={isVerifyingTaxId}
-							>
-								{isVerifyingTaxId ? (
-									<><i className="fas fa-spinner fa-spin"></i> Processing...</>
-								) : (
-									<><i className="fas fa-check-circle"></i> Approve Document</>
-								)}
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
-
-			{/* Tax ID Rejection Reason Modal */}
-			{showTaxIdRejectionModal && selectedTaxIdDocument && (
-				<div className="document-modal-overlay">
-					<div className="rejection-modal">
-						<div className="document-modal-header">
-							<h3>Reject Tax ID Document</h3>
-							<button
-								className="close-modal-btn"
-								onClick={() => {
-									setShowTaxIdRejectionModal(false);
-									setTaxIdRejectionReason('');
-								}}
-								style={{
-									position: 'absolute',
-									right: '15px',
-									top: '15px',
-									background: 'none',
-									border: 'none',
-									fontSize: '20px',
-									cursor: 'pointer',
-									color: 'white'
-								}}
-							>
-								✕
-							</button>
-						</div>
-
-						<div className="document-modal-body">
-							<p>Please provide a reason for rejecting this tax ID document:</p>
-							<textarea
-								className="rejection-textarea"
-								value={taxIdRejectionReason}
-								onChange={(e) => setTaxIdRejectionReason(e.target.value)}
-								placeholder="Enter reason for rejection (e.g., Document is unclear, Invalid document type, etc.)"
-								disabled={isVerifyingTaxId}
-								rows={4}
-							/>
-						</div>
-
-						<div className="document-modal-footer">
-							<button
-								className="cancel-btn"
-								onClick={() => {
-									setShowTaxIdRejectionModal(false);
-									setTaxIdRejectionReason('');
-								}}
-								disabled={isVerifyingTaxId}
-							>
-								Cancel
-							</button>
-							<button
-								className="confirm-reject-btn"
-								onClick={() => {
-									if (!taxIdRejectionReason.trim()) {
-										showNotification('Please provide a rejection reason', 'error');
-										return;
-									}
-									handleVerifyTaxIdDocument(selectedTaxIdDocument.walletAddress, false, taxIdRejectionReason.trim());
-								}}
-								disabled={isVerifyingTaxId || !taxIdRejectionReason.trim()}
-							>
-								{isVerifyingTaxId ? (
-									<><i className="fas fa-spinner fa-spin"></i> Processing...</>
-								) : (
-									<><i className="fas fa-ban"></i> Confirm Rejection</>
-								)}
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
-
-			{/* Identity Document Review Modal */}
-			{showDocumentModal && selectedDocument && (
-				<div className="document-modal-overlay">
-					<div className="document-modal enhanced-modal">
-						<div className="document-modal-header">
-							<h3>Review Identity Document</h3>
-							<button
-								className="close-modal-btn"
-								onClick={() => {
-									setShowDocumentModal(false);
-									setSelectedDocument(null);
-								}}
-								style={{
-									position: 'absolute',
-									right: '15px',
-									top: '15px',
-									background: 'none',
-									border: 'none',
-									fontSize: '20px',
-									cursor: 'pointer',
-									color: 'white'
-								}}
-							>
-								✕
-							</button>
-						</div>
-
-						<div className="document-modal-body">
-							<div className="document-details">
-								<div className="detail-row">
-									<strong>Document Type:</strong>
-									<span>{formatDocumentType(selectedDocument.documentType)}</span>
-								</div>
-								<div className="detail-row">
-									<strong>Wallet Address:</strong>
-									<span className="wallet-address">{selectedDocument.walletAddress}</span>
-								</div>
-								<div className="detail-row">
-									<strong>Upload Date:</strong>
-									<span>{new Date(selectedDocument.uploadedAt).toLocaleString()}</span>
-								</div>
-								<div className="detail-row">
-									<strong>Images Provided:</strong>
-									<span className="images-info">
-										<span className="image-indicator front">
-											<i className="fas fa-image"></i> Front
-										</span>
-										{selectedDocument.hasBackImage && (
-											<span className="image-indicator back">
-												<i className="fas fa-image"></i> Back
-											</span>
-										)}
-										{!selectedDocument.hasBackImage && (
-											<span className="image-indicator missing">
-												<i className="fas fa-times"></i> Back (Not provided)
-											</span>
-										)}
-									</span>
-								</div>
-								{selectedDocument.rejectionReason && (
-									<div className="detail-row">
-										<strong>Previous Rejection:</strong>
-										<span className="rejection-reason">{selectedDocument.rejectionReason}</span>
-									</div>
-								)}
-							</div>
-
-							{/* Enhanced Image Container for Front and Back */}
-							<div className="document-images-container">
-								{/* Front Image */}
-								<div className="document-image-section">
-									<h4 className="image-section-title">
-										<i className="fas fa-image"></i> Front Side
-									</h4>
-									<div className="document-image-wrapper">
-										<img
-											src={selectedDocument.frontImageUrl || selectedDocument.ipfsUrl}
-											alt="Front side of identity document"
-											className="document-image"
-											onError={(e) => {
-												const target = e.target as HTMLImageElement;
-												target.style.display = 'none';
-												const nextSibling = target.nextElementSibling as HTMLElement;
-												if (nextSibling) {
-													nextSibling.style.display = 'block';
-												}
-											}}
-										/>
-										<div className="image-error" style={{ display: 'none' }}>
-											<i className="fas fa-exclamation-triangle"></i>
-											<p>Unable to load front image</p>
-											<a
-												href={selectedDocument.frontImageUrl || selectedDocument.ipfsUrl}
-												target="_blank"
-												rel="noopener noreferrer"
-												className="view-link"
-											>
-												<i className="fas fa-external-link-alt"></i> View in new tab
-											</a>
-										</div>
-									</div>
-								</div>
-
-								{/* Back Image (if available) */}
-								{selectedDocument.hasBackImage && selectedDocument.backImageUrl ? (
-									<div className="document-image-section">
-										<h4 className="image-section-title">
-											<i className="fas fa-image"></i> Back Side
-										</h4>
-										<div className="document-image-wrapper">
-											<img
-												src={selectedDocument.backImageUrl}
-												alt="Back side of identity document"
-												className="document-image"
-												onError={(e) => {
-													const target = e.target as HTMLImageElement;
-													target.style.display = 'none';
-													const nextSibling = target.nextElementSibling as HTMLElement;
-													if (nextSibling) {
-														nextSibling.style.display = 'block';
-													}
-												}}
-											/>
-											<div className="image-error" style={{ display: 'none' }}>
-												<i className="fas fa-exclamation-triangle"></i>
-												<p>Unable to load back image</p>
-												<a
-													href={selectedDocument.backImageUrl}
-													target="_blank"
-													rel="noopener noreferrer"
-													className="view-link"
-												>
-													<i className="fas fa-external-link-alt"></i> View in new tab
-												</a>
-											</div>
-										</div>
-									</div>
-								) : (
-									<div className="document-image-section missing-image">
-										<h4 className="image-section-title">
-											<i className="fas fa-image"></i> Back Side
-										</h4>
-										<div className="no-back-image">
-											<i className="fas fa-times-circle"></i>
-											<p>Back side image not provided</p>
-											<small>This may be acceptable for some document types</small>
-										</div>
-									</div>
-								)}
-							</div>
-
-							<div className="document-verification-guidelines">
-								<h4>Verification Guidelines:</h4>
-								<div className="guidelines-grid">
-									<div className="guideline-column">
-										<h5>Front Side Requirements:</h5>
-										<ul>
-											<li>✓ Document should be clear and readable</li>
-											<li>✓ All four corners should be visible</li>
-											<li>✓ No glare or shadows obscuring text</li>
-											<li>✓ Photo and personal details visible</li>
-										</ul>
-									</div>
-									<div className="guideline-column">
-										<h5>Back Side Requirements:</h5>
-										<ul>
-											<li>✓ Additional security features visible (if applicable)</li>
-											<li>✓ Barcodes/magnetic strips clear (if present)</li>
-											<li>✓ Address information readable (if present)</li>
-											<li>⚠️ Not required for all document types</li>
-										</ul>
-									</div>
-								</div>
-
-								<div className="document-type-notes">
-									<strong>Document Type Notes:</strong>
-									<ul>
-										<li><strong>Passport:</strong> Back side typically not required</li>
-										<li><strong>Driver's License:</strong> Back side recommended</li>
-										<li><strong>National ID:</strong> Back side may be required depending on country</li>
-									</ul>
-								</div>
-							</div>
-						</div>
-
-						<div className="document-modal-footer">
-							<button
-								className="reject-btn"
-								onClick={handleRejectClick}
-								disabled={isVerifying}
-							>
-								<i className="fas fa-times-circle"></i>
-								Reject Document
-							</button>
-							<button
-								className="approve-btn"
-								onClick={() => handleVerifyDocument(selectedDocument.walletAddress, true)}
-								disabled={isVerifying}
-							>
-								{isVerifying ? (
-									<><i className="fas fa-spinner fa-spin"></i> Processing...</>
-								) : (
-									<><i className="fas fa-check-circle"></i> Approve Document</>
-								)}
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
-
-			{/* Rejection Reason Modal */}
-			{showRejectionModal && selectedDocument && (
-				<div className="document-modal-overlay">
-					<div className="rejection-modal">
-						<div className="document-modal-header">
-							<h3>Reject Document</h3>
-							<button
-								className="close-modal-btn"
-								onClick={() => {
-									setShowRejectionModal(false);
-									setRejectionReason('');
-								}}
-								style={{
-									position: 'absolute',
-									right: '15px',
-									top: '15px',
-									background: 'none',
-									border: 'none',
-									fontSize: '20px',
-									cursor: 'pointer',
-									color: 'white'
-								}}
-							>
-								✕
-							</button>
-						</div>
-
-						<div className="document-modal-body">
-							<p>Please provide a reason for rejecting this document:</p>
-							<textarea
-								className="rejection-textarea"
-								value={rejectionReason}
-								onChange={(e) => setRejectionReason(e.target.value)}
-								placeholder="Enter reason for rejection (e.g., Document is blurry, Expired document, etc.)"
-								disabled={isVerifying}
-								rows={4}
-							/>
-						</div>
-
-						<div className="document-modal-footer">
-							<button
-								className="cancel-btn"
-								onClick={() => {
-									setShowRejectionModal(false);
-									setRejectionReason('');
-								}}
-								disabled={isVerifying}
-							>
-								Cancel
-							</button>
-							<button
-								className="confirm-reject-btn"
-								onClick={handleRejectSubmit}
-								disabled={isVerifying || !rejectionReason.trim()}
-							>
-								{isVerifying ? (
-									<><i className="fas fa-spinner fa-spin"></i> Processing...</>
-								) : (
-									<><i className="fas fa-ban"></i> Confirm Rejection</>
-								)}
-							</button>
-						</div>
-					</div>
-				</div>
-			)}
-		</div>
-	);
 };
 
-export default AdminPanel;
+const contractABI = [
+	{
+		"inputs": [
+			{
+				"internalType": "address[]",
+				"name": "addresses",
+				"type": "address[]"
+			}
+		],
+		"name": "addToWhitelist",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "receiver",
+				"type": "address"
+			},
+			{
+				"internalType": "string",
+				"name": "name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "email",
+				"type": "string"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "airdrop",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "_symbol",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "_initBaseURI",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "_initNotRevealedUri",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "_contractURI",
+				"type": "string"
+			}
+		],
+		"stateMutability": "nonpayable",
+		"type": "constructor"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			}
+		],
+		"name": "OperatorNotAllowed",
+		"type": "error"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "owner",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "approved",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "Approval",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "owner",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			},
+			{
+				"indexed": false,
+				"internalType": "bool",
+				"name": "approved",
+				"type": "bool"
+			}
+		],
+		"name": "ApprovalForAll",
+		"type": "event"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "approve",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address[]",
+				"name": "receivers",
+				"type": "address[]"
+			},
+			{
+				"internalType": "string[]",
+				"name": "names",
+				"type": "string[]"
+			},
+			{
+				"internalType": "string[]",
+				"name": "emails",
+				"type": "string[]"
+			},
+			{
+				"internalType": "uint256[]",
+				"name": "tokenIds",
+				"type": "uint256[]"
+			}
+		],
+		"name": "bulkAirdrop",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_mintAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "string",
+				"name": "_couponCode",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "email",
+				"type": "string"
+			}
+		],
+		"name": "couponMint",
+		"outputs": [],
+		"stateMutability": "payable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_mintAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "string",
+				"name": "name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "email",
+				"type": "string"
+			}
+		],
+		"name": "mint",
+		"outputs": [],
+		"stateMutability": "payable",
+		"type": "function"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "previousOwner",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "newOwner",
+				"type": "address"
+			}
+		],
+		"name": "OwnershipTransferred",
+		"type": "event"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bool",
+				"name": "_state",
+				"type": "bool"
+			}
+		],
+		"name": "pause",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address[]",
+				"name": "addresses",
+				"type": "address[]"
+			}
+		],
+		"name": "removeFromWhitelist",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "renounceOwnership",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "from",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "to",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "safeTransferFrom",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "from",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "to",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "bytes",
+				"name": "data",
+				"type": "bytes"
+			}
+		],
+		"name": "safeTransferFrom",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_additionalPrice",
+				"type": "uint256"
+			}
+		],
+		"name": "setAdditionalPrice",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			},
+			{
+				"internalType": "bool",
+				"name": "approved",
+				"type": "bool"
+			}
+		],
+		"name": "setApprovalForAll",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_newBaseExtension",
+				"type": "string"
+			}
+		],
+		"name": "setBaseExtension",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_basePrice",
+				"type": "uint256"
+			}
+		],
+		"name": "setBasePrice",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_newBaseURI",
+				"type": "string"
+			}
+		],
+		"name": "setBaseURI",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_contractURI",
+				"type": "string"
+			}
+		],
+		"name": "setContractURI",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bool",
+				"name": "_coupon_mint_status",
+				"type": "bool"
+			}
+		],
+		"name": "setCoupon_mint_status",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_couponCode",
+				"type": "string"
+			}
+		],
+		"name": "setCouponCode",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_couponMintPrice",
+				"type": "uint256"
+			}
+		],
+		"name": "setCouponMintPrice",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_initialIssuancePercentage",
+				"type": "uint256"
+			}
+		],
+		"name": "setInitialIssuancePercentage",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_keptInTheContractPercentage",
+				"type": "uint256"
+			}
+		],
+		"name": "setKeptInTheContractPercentage",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_max_coupon_per_wallet",
+				"type": "uint256"
+			}
+		],
+		"name": "setMax_coupon_per_wallet",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_max_per_wallet",
+				"type": "uint256"
+			}
+		],
+		"name": "setMax_per_wallet",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_MAX_SUPPLY",
+				"type": "uint256"
+			}
+		],
+		"name": "setMAX_SUPPLY",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_max_whitelist_per_wallet",
+				"type": "uint256"
+			}
+		],
+		"name": "setMax_whitelist_per_wallet",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_notRevealedURI",
+				"type": "string"
+			}
+		],
+		"name": "setNotRevealedURI",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bool",
+				"name": "_public_mint_status",
+				"type": "bool"
+			}
+		],
+		"name": "setPublic_mint_status",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_publicSaleCost",
+				"type": "uint256"
+			}
+		],
+		"name": "setPublicSaleCost",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "_royaltyAddress",
+				"type": "address"
+			}
+		],
+		"name": "setRoyaltyAddress",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "_receiver",
+				"type": "address"
+			},
+			{
+				"internalType": "uint96",
+				"name": "_royaltyFeesInBips",
+				"type": "uint96"
+			}
+		],
+		"name": "setRoyaltyInfo",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bool",
+				"name": "_whitelist_mint_status",
+				"type": "bool"
+			}
+		],
+		"name": "setWhitelist_mint_status",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_whitelistAdditionalPrice",
+				"type": "uint256"
+			}
+		],
+		"name": "setWhitelistAdditionalPrice",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_whitelistBasePrice",
+				"type": "uint256"
+			}
+		],
+		"name": "setWhitelistBasePrice",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "toggleReveal",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "from",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "address",
+				"name": "to",
+				"type": "address"
+			},
+			{
+				"indexed": true,
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "Transfer",
+		"type": "event"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "from",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "to",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "transferFrom",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "newOwner",
+				"type": "address"
+			}
+		],
+		"name": "transferOwnership",
+		"outputs": [],
+		"stateMutability": "nonpayable",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_mintAmount",
+				"type": "uint256"
+			},
+			{
+				"internalType": "string",
+				"name": "name",
+				"type": "string"
+			},
+			{
+				"internalType": "string",
+				"name": "email",
+				"type": "string"
+			}
+		],
+		"name": "whitelistMint",
+		"outputs": [],
+		"stateMutability": "payable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "withdraw",
+		"outputs": [],
+		"stateMutability": "payable",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "additionalPrice",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "owner",
+				"type": "address"
+			}
+		],
+		"name": "balanceOf",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "baseExtension",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "basePrice",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "baseURI",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_salePrice",
+				"type": "uint256"
+			}
+		],
+		"name": "calculateRoyalty",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "contractURI",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "coupon_mint_status",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "couponMintPrice",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "couponUserMinted",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "getApproved",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "wallet",
+				"type": "address"
+			}
+		],
+		"name": "getWalletTokenIds",
+		"outputs": [
+			{
+				"internalType": "uint256[]",
+				"name": "",
+				"type": "uint256[]"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "owner",
+				"type": "address"
+			},
+			{
+				"internalType": "address",
+				"name": "operator",
+				"type": "address"
+			}
+		],
+		"name": "isApprovedForAll",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "_couponCode",
+				"type": "string"
+			}
+		],
+		"name": "isValidCoupon",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "user",
+				"type": "address"
+			}
+		],
+		"name": "isWhitelisted",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "max_coupon_per_wallet",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "max_per_wallet",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "MAX_SUPPLY",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "max_whitelist_per_wallet",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "name",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "notRevealedUri",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "OPERATOR_FILTER_REGISTRY",
+		"outputs": [
+			{
+				"internalType": "contract IOperatorFilterRegistry",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "owner",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "ownerOf",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "paused",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "public_mint_status",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "publicSaleCost",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "revealed",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "_tokenId",
+				"type": "uint256"
+			},
+			{
+				"internalType": "uint256",
+				"name": "_salePrice",
+				"type": "uint256"
+			}
+		],
+		"name": "royaltyInfo",
+		"outputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "bytes4",
+				"name": "interfaceId",
+				"type": "bytes4"
+			}
+		],
+		"name": "supportsInterface",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "symbol",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "tokenIdToEmail",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "tokenIdToName",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "uint256",
+				"name": "tokenId",
+				"type": "uint256"
+			}
+		],
+		"name": "tokenURI",
+		"outputs": [
+			{
+				"internalType": "string",
+				"name": "",
+				"type": "string"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "totalSupply",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "userMinted",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			},
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"name": "walletToTokenIds",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "whitelist_mint_status",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "whitelistAdditionalPrice",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "whitelistBasePrice",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "whitelisted",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "",
+				"type": "bool"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "",
+				"type": "address"
+			}
+		],
+		"name": "whitelistUserMinted",
+		"outputs": [
+			{
+				"internalType": "uint256",
+				"name": "",
+				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	}
+];
+
+const contractAddress = '0xcD9B1F056f80a6084B614C50dd345778633d13A4'; // Replace with your contract address
+
+// Create contract instance
+const nftContract = new web3.eth.Contract(contractABI, contractAddress);
+
+// Middleware
+app.use(cookieParser());
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use((req, res, next) => {
+	res.header('Access-Control-Allow-Origin', '*');
+	res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+	res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+	next();
+});
+
+
+// Serve static files (for generated images)
+app.use('/images', express.static(path.join(__dirname, 'generated_images')));
+
+var corsOptions = {
+	origin: ['https://adminpanel.musecoinx.com', 'https://dgfg-six.vercel.app/', 'https://www.musecoinx.com/', 'http://localhost:3000', 'https://hopecoinkk.musecoinx.com', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:3002'],
+	optionsSuccessStatus: 200,
+	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+	allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+	exposedHeaders: ['Content-Type', 'Content-Disposition', 'Content-Length'],
+	credentials: true
+};
+
+
+// Pinata configuration
+const PINATA_JWT = process.env.PINATA_JWT; // Add your Pinata JWT token to environment variables
+const PINATA_API_URL = 'https://api.pinata.cloud/pinning/pinFileToIPFS';
+
+
+
+
+// Initialize Firebase Admin only if not already initialized
+if (!admin.apps.length) {
+	try {
+		admin.initializeApp({
+			credential: admin.credential.applicationDefault(),
+			databaseURL: process.env.FIREBASE_DATABASE_URL
+		});
+		console.log('Firebase Admin initialized successfully');
+	} catch (error) {
+		console.error('Firebase Admin initialization error:', error);
+	}
+}
+
+// Ensure directories exist
+const ensureDirectoryExists = (dirPath) => {
+	if (!fs.existsSync(dirPath)) {
+		fs.mkdirSync(dirPath, { recursive: true });
+	}
+};
+
+// Initialize directories
+ensureDirectoryExists(path.join(__dirname, 'generated_images'));
+ensureDirectoryExists(path.join(__dirname, 'assets'));
+
+
+const createMintSuccessEmail = (userName, tokenId, certificateUrl, isAirdrop = false) => {
+	const subject = isAirdrop ?
+		`🎁 Your Hope KK NFT has been airdropped!` :
+		`🎉 Your Hope KK NFT has been minted successfully!`;
+
+	const mintingText = isAirdrop ?
+		'has been airdropped to your wallet' :
+		'has been successfully minted';
+
+	return {
+		subject: subject,
+		html: `
+		<!DOCTYPE html>
+		<html>
+		<head>
+			<style>
+				body {
+					font-family: 'Arial', sans-serif;
+					line-height: 1.6;
+					color: #333;
+					max-width: 600px;
+					margin: 0 auto;
+					padding: 20px;
+					background-color: #f4f4f4;
+				}
+				.email-container {
+					background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+					border-radius: 15px;
+					padding: 30px;
+					box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+				}
+				.header {
+					text-align: center;
+					color: white;
+					margin-bottom: 30px;
+				}
+				.header h1 {
+					margin: 0;
+					font-size: 28px;
+					text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+				}
+				.content {
+					background: white;
+					padding: 30px;
+					border-radius: 10px;
+					margin: 20px 0;
+					box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+				}
+				.nft-info {
+					background: #f8f9fa;
+					padding: 20px;
+					border-radius: 8px;
+					margin: 20px 0;
+					border-left: 4px solid #667eea;
+				}
+				.download-button {
+					display: inline-block;
+					background: linear-gradient(45deg, #667eea, #764ba2);
+					color: white;
+					padding: 15px 30px;
+					text-decoration: none;
+					border-radius: 25px;
+					font-weight: bold;
+					text-align: center;
+					margin: 20px 0;
+					box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+					transition: all 0.3s ease;
+				}
+				.download-button:hover {
+					transform: translateY(-2px);
+					box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+				}
+				.footer {
+					text-align: center;
+					color: #666;
+					font-size: 14px;
+					margin-top: 30px;
+					padding-top: 20px;
+					border-top: 1px solid #eee;
+				}
+				.tribute-section {
+					background: #fff3cd;
+					border: 1px solid #ffeaa7;
+					border-radius: 8px;
+					padding: 20px;
+					margin: 20px 0;
+					text-align: center;
+				}
+				.social-links {
+					text-align: center;
+					margin: 20px 0;
+				}
+				.social-links a {
+					display: inline-block;
+					margin: 0 10px;
+					color: #667eea;
+					text-decoration: none;
+				}
+				.important-note {
+					background: #d1ecf1;
+					border: 1px solid #bee5eb;
+					border-radius: 8px;
+					padding: 15px;
+					margin: 20px 0;
+				}
+			</style>
+		</head>
+		<body>
+			<div class="email-container">
+				<div class="header">
+					<h1>🎵 Hope KK NFT</h1>
+					<p>Tribute to the Legendary Singer</p>
+				</div>
+				
+				<div class="content">
+					<h2>Hello ${userName}! 👋</h2>
+					
+					<p>Congratulations! Your Hope KK commemorative NFT ${mintingText}. You are now part of an exclusive community honoring the musical legacy of the legendary singer KK.</p>
+					
+					<div class="nft-info">
+						<h3>📜 Your NFT Details:</h3>
+						<p><strong>Token ID:</strong> #${tokenId?.toString().padStart(5, '0') || 'TBD'}</p>
+						<p><strong>Collection:</strong> Hope KK Commemorative NFTs</p>
+						<p><strong>Status:</strong> Successfully ${isAirdrop ? 'Airdropped' : 'Minted'}</p>
+					</div>
+					
+					<div class="tribute-section">
+						<h3>🎤 About This Tribute</h3>
+						<p>This NFT celebrates KK's extraordinary musical journey and his timeless contribution to the world of music. Through "Humein Asha Hai," we honor not just his voice, but his vision of hope and resilience.</p>
+					</div>
+					
+					${certificateUrl ? `
+					<div style="text-align: center;">
+						<h3>🏆 Download Your Certificate</h3>
+						<p>Your personalized ownership certificate is ready!</p>
+						<a href="https://hopecoinkk.musecoinx.com/my-dashboard" class="download-button" style="color: white;">My Dashboard</a>
+					</div>
+					` : ''}
+					
+					<div class="important-note">
+						<h4>📱 What's Next?</h4>
+						<ul style="text-align: left;">
+							<li>Your NFT is now in your wallet</li>
+							<li>You can view it on OpenSea and other NFT marketplaces</li>
+							<li>Keep your certificate as proof of ownership</li>
+							<li>Join our community to stay updated on future releases</li>
+						</ul>
+					</div>
+					
+					<div class="social-links">
+						<p><strong>Connect with us:</strong></p>
+						<a href="https://www.musecoinx.com">🌐 Website</a>
+						<a href="mailto:contact@musecoinx.com">📧 Support</a>
+					</div>
+				</div>
+				
+				<div class="footer">
+					<p style="font-size: 15px; color: white;">Thank you for being part of this tribute to KK's legacy.</p>
+					<p style="font-size: 15px; color: white;">© ${new Date().getFullYear()} MuseCoinX. A PhyDigi Limited Company. All rights reserved</p>
+					<p style="font-size: 12px; color: #999;">
+						This is an automated email. Please do not reply to this address.
+					</p>
+				</div>
+			</div>
+		</body>
+		</html>
+		`
+	};
+};
+
+const sendMintSuccessEmail = async (userEmail, userName, tokenId, certificateUrl, isAirdrop = false) => {
+	try {
+		const emailContent = createMintSuccessEmail(userName, tokenId, certificateUrl, isAirdrop);
+
+		const mailOptions = {
+			from: `"MuseCoinX - Hope KK NFTs" <${process.env.EMAIL_USER}>`,
+			to: userEmail,
+			subject: emailContent.subject,
+			html: emailContent.html
+		};
+
+		const result = await emailTransporter.sendMail(mailOptions);
+		console.log('Email sent successfully:', result.messageId);
+		return { success: true, messageId: result.messageId };
+	} catch (error) {
+		console.error('Error sending email:', error);
+		return { success: false, error: error.message };
+	}
+};
+
+const uploadToIPFS = async (filePath, fileName, maxRetries = 5) => {
+	for (let attempt = 1; attempt <= maxRetries; attempt++) {
+		try {
+			console.log(`📤 Uploading attempt ${attempt} to IPFS...`);
+
+			if (!PINATA_JWT) {
+				throw new Error('PINATA_JWT environment variable is not set');
+			}
+
+			const formData = new FormData();
+			const fileStream = fs.createReadStream(filePath);
+
+			formData.append('file', fileStream);
+
+			// Add metadata
+			const metadata = JSON.stringify({
+				name: fileName,
+				keyvalues: {
+					type: 'artist-project-image',
+					uploaded: new Date().toISOString()
+				}
+			});
+			formData.append('pinataMetadata', metadata);
+
+			// Add options
+			const options = JSON.stringify({
+				cidVersion: 1,
+			});
+			formData.append('pinataOptions', options);
+
+			// Create a custom axios instance with longer timeout
+			const axiosInstance = axios.create({
+				timeout: 30000, // 30 seconds timeout
+				timeoutErrorMessage: 'IPFS upload timeout'
+			});
+
+			const response = await axiosInstance.post(PINATA_API_URL, formData, {
+				maxBodyLength: Infinity,
+				maxContentLength: Infinity,
+				headers: {
+					'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
+					'Authorization': `Bearer ${PINATA_JWT}`
+				}
+			});
+
+			console.log('✅ File uploaded to IPFS:', response.data);
+
+			// Return the IPFS URL
+			return {
+				ipfsHash: response.data.IpfsHash,
+				ipfsUrl: `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`,
+				pinataUrl: `https://pinata.cloud/ipfs/${response.data.IpfsHash}`
+			};
+
+		} catch (error) {
+			console.error(`❌ IPFS upload error (attempt ${attempt}):`, error.message);
+
+			if (attempt === maxRetries) {
+				throw new Error(`IPFS upload failed after ${maxRetries} attempts: ${error.message}`);
+			}
+
+			// Exponential backoff for retries
+			const delayMs = Math.pow(2, attempt) * 1000;
+			console.log(`⏳ Retrying in ${delayMs / 1000} seconds...`);
+			await new Promise(resolve => setTimeout(resolve, delayMs));
+		}
+	}
+};
+
+
+// Function to generate personalized ownership card
+const generateOwnershipCard = async (userName, tokenId, outputPath) => {
+	try {
+		// Register Trajan Pro fonts
+		const trajanRegularPath = path.join(__dirname, 'assets', 'fonts', 'TrajanPro-Regular.otf');
+		const trajanBoldPath = path.join(__dirname, 'assets', 'fonts', 'TrajanPro-Bold.otf');
+
+		let fontFamily = 'serif'; // fallback
+
+		try {
+			if (fs.existsSync(trajanBoldPath)) {
+				registerFont(trajanBoldPath, { family: 'Trajan Pro Bold' });
+				fontFamily = 'Trajan Pro Bold';
+				console.log('Loaded Trajan Pro Bold font');
+			} else if (fs.existsSync(trajanRegularPath)) {
+				registerFont(trajanRegularPath, { family: 'Trajan Pro' });
+				fontFamily = 'Trajan Pro';
+				console.log('Loaded Trajan Pro Regular font');
+			}
+		} catch (fontError) {
+			console.log('Trajan Pro font not found, using fallback font:', fontError.message);
+		}
+
+		// Load the base image
+		const baseImagePath = path.join(__dirname, 'assets', 'ownership_card_template.png');
+
+		// Check if base image exists
+		if (!fs.existsSync(baseImagePath)) {
+			throw new Error('Base ownership card template not found. Please add ownership_card_template.png to the assets folder.');
+		}
+
+		const baseImage = await loadImage(baseImagePath);
+
+		// Create canvas with same dimensions as base image
+		const canvas = createCanvas(baseImage.width, baseImage.height);
+		const ctx = canvas.getContext('2d');
+
+		// Draw the base image
+		ctx.drawImage(baseImage, 0, 0);
+
+		// Configure text styling
+		ctx.fillStyle = '#e5e5e6'; // White text
+		ctx.textBaseline = 'middle';
+
+		// Set font with Trajan Pro preference and fallbacks
+		let nameFontSize = 48;
+
+		// Dynamic font sizing based on name length for better fit
+		if (userName.length > 20) nameFontSize = 42;
+		else if (userName.length > 15) nameFontSize = 45;
+		else if (userName.length > 10) nameFontSize = 48;
+
+		ctx.font = `${nameFontSize}px "${fontFamily}", "Times New Roman", serif`;
+
+		// Calculate positions
+		const textY = canvas.height * 0.88; // Same Y position for both texts
+		const nameX = canvas.width / 15; // Left margin for username
+		const tokenIdX = canvas.width - (canvas.width / 15); // Right margin for token ID
+
+		// Add text shadow for better readability
+		ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+		ctx.shadowOffsetX = 2;
+		ctx.shadowOffsetY = 2;
+		ctx.shadowBlur = 4;
+
+		// Draw the username (left-aligned)
+		ctx.textAlign = 'left';
+		ctx.fillText(userName.toUpperCase(), nameX, textY);
+
+		// Format token ID as #00001, #00010, #00500, etc.
+		const formattedTokenId = tokenId ? `Card #${tokenId.toString().padStart(5, '0')}` : 'Card #00000';
+
+		// Draw the token ID (right-aligned)
+		ctx.textAlign = 'right';
+		ctx.fillText(formattedTokenId, tokenIdX, textY);
+
+		// Reset shadow
+		ctx.shadowColor = 'transparent';
+		ctx.shadowOffsetX = 0;
+		ctx.shadowOffsetY = 0;
+		ctx.shadowBlur = 0;
+
+		// Save the generated image
+		const buffer = canvas.toBuffer('image/png');
+		fs.writeFileSync(outputPath, buffer);
+
+		return true;
+	} catch (error) {
+		console.error('Error generating ownership card:', error);
+		throw error;
+	}
+};
+
+const authenticateAdmin = async (req, res, next) => {
+	try {
+		// 1. Extract admin key from headers or query
+		const adminKey = req.headers['x-admin-key'] || req.query.adminKey;
+		const expectedKey = process.env.ADMIN_API_KEY || process.env.REACT_APP_ADMIN_KEY;
+
+		// 2. Key validation
+		if (!adminKey || adminKey !== expectedKey) {
+			// Log unauthorized attempt
+			await db.collection('security_log').add({
+				event: 'unauthorized_admin_attempt',
+				ip: req.ip,
+				userAgent: req.get('User-Agent'),
+				timestamp: admin.firestore.FieldValue.serverTimestamp(),
+				endpoint: req.path,
+				attemptedKey: adminKey ? 'REDACTED' : 'MISSING'
+			});
+
+			return res.status(401).json({
+				error: 'Unauthorized: Invalid admin key',
+				code: 'ADMIN_AUTH_FAILED'
+			});
+		}
+
+		// 3. Log successful admin access
+		await db.collection('admin_access_log').add({
+			ip: req.ip,
+			endpoint: req.path,
+			method: req.method,
+			timestamp: admin.firestore.FieldValue.serverTimestamp(),
+			userAgent: req.get('User-Agent')
+		});
+
+		// 4. Add admin context to request
+		req.adminContext = {
+			authenticatedAt: new Date().toISOString(),
+			accessMethod: adminKey === req.query.adminKey ? 'query' : 'header',
+			adminId: 'admin'
+		};
+
+		next();
+
+	} catch (error) {
+		console.error('Admin authentication system error:', error);
+		res.status(500).json({
+			error: 'Authentication system error',
+			code: 'AUTH_SYSTEM_FAILURE'
+		});
+	}
+};
+
+// Add this endpoint around line 1200 (near other payout endpoints)
+app.get('/api/payout-limits/current', cors(corsOptions), async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				totalLimit: 0,
+				isActive: false
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		res.json({
+			totalLimit: data.totalLimit || 0,
+			remainingLimit: remainingLimit,
+			isActive: remainingLimit > 0
+		});
+	} catch (error) {
+		console.error('Error fetching current payout limits:', error);
+		res.status(500).json({ error: 'Failed to fetch payout limits' });
+	}
+});
+
+// ADD: Public endpoint to show remaining limits (without admin auth)
+app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				isActive: false,
+				remainingLimit: 0
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		// Only return public info - no sensitive data
+		res.json({
+			isActive: remainingLimit > 0,
+			remainingLimit: remainingLimit,
+			minimumPayout: 1.00
+		});
+	} catch (error) {
+		console.error('Error fetching public limits:', error);
+		res.status(500).json({ error: 'Failed to fetch limits' });
+	}
+});
+
+// POST: Set/Update payout limits
+app.post('/api/authenticateAdmin', cors(corsOptions), async (req, res) => {
+	try {
+		const { totalLimit, resetPeriod = 'monthly' } = req.body;
+
+		// Validation
+		if (!totalLimit || totalLimit <= 0) {
+			return res.status(400).json({ error: 'Total limit must be greater than 0' });
+		}
+
+		if (totalLimit > 100000) { // Reasonable max limit
+			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
+		}
+
+		const db = admin.firestore();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').set({
+			totalLimit: parseFloat(totalLimit),
+			usedAmount: 0, // Reset used amount when setting new limit
+			lastReset: now,
+			resetPeriod: resetPeriod,
+			updatedAt: now,
+			updatedBy: 'admin' // In production, use actual admin ID
+		});
+
+		// Log the change for audit trail
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_updated',
+			oldLimit: null, // You might want to fetch the old value first
+			newLimit: totalLimit,
+			timestamp: now,
+			adminId: 'admin' // In production, use actual admin ID
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limit updated successfully',
+			totalLimit: parseFloat(totalLimit),
+			remainingLimit: parseFloat(totalLimit)
+		});
+	} catch (error) {
+		console.error('Error setting payout limits:', error);
+		res.status(500).json({ error: 'Failed to set payout limits' });
+	}
+});
+
+// POST: Reset payout limits (manual reset)
+app.post('/api/authenticateAdmin_reset', cors(corsOptions), async (req, res) => {
+	try {
+		const db = admin.firestore();
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.status(404).json({ error: 'Payout limits not configured' });
+		}
+
+		const data = limitsDoc.data();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: 0,
+			lastReset: now,
+			updatedAt: now
+		});
+
+		// Log the reset
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_reset',
+			previousUsedAmount: data.usedAmount,
+			timestamp: now,
+			adminId: 'admin'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limits reset successfully',
+			remainingLimit: data.totalLimit
+		});
+	} catch (error) {
+		console.error('Error resetting payout limits:', error);
+		res.status(500).json({ error: 'Failed to reset payout limits' });
+	}
+});
+
+
+// Apply rate limiting to admin endpoints
+//app.use('/api/admin', adminLimiter);
+
+// Public endpoint to show remaining limits
+app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				isActive: false,
+				remainingLimit: 0
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		res.json({
+			isActive: remainingLimit > 0,
+			remainingLimit: remainingLimit,
+			minimumPayout: 1.00
+		});
+	} catch (error) {
+		console.error('Error fetching public limits:', error);
+		res.status(500).json({ error: 'Failed to fetch limits' });
+	}
+});
+
+// Reset payout limits
+app.post('/api/admin/payout-limits/reset', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.status(404).json({ error: 'Payout limits not configured' });
+		}
+
+		const data = limitsDoc.data();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: 0,
+			lastReset: now,
+			updatedAt: now
+		});
+
+		// Audit log
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_reset',
+			previousUsedAmount: data.usedAmount,
+			timestamp: now,
+			adminId: req.adminContext?.adminId || 'admin', // Add safe fallback
+			ip: req.ip || 'unknown'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limits reset successfully',
+			remainingLimit: data.totalLimit
+		});
+	} catch (error) {
+		console.error('Error resetting payout limits:', error);
+		res.status(500).json({ error: 'Failed to reset payout limits' });
+	}
+});
+
+app.post('/api/users', cors(corsOptions), async (req, res) => {
+	try {
+		const {
+			name,
+			email,
+			walletAddress,
+			transactionHash,
+			tokenId,
+			nftMinted,
+			mintedAt,
+			ageConfirmed,
+			termsAccepted,
+			privacyPolicyAccepted,
+			subscribe,
+			isAirdrop
+		} = req.body;
+
+		console.log('Received user data:', { name, email, walletAddress, tokenId, isAirdrop });
+
+		if (!email) {
+			return res.status(400).json({ error: 'Email is required' });
+		}
+
+		// Create a sanitized document ID
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+		const userRef = db.collection('users').doc(docId);
+
+		// Check if user already exists
+		const doc = await userRef.get();
+		let ipfsData = null;
+		let localImageUrl = null;
+		let certificateExists = false;
+
+		// Check if certificate already exists for this token ID
+		if (tokenId) {
+			try {
+				const certDoc = await db.collection('certificates').doc(tokenId.toString()).get();
+				if (certDoc.exists) {
+					certificateExists = true;
+					const certData = certDoc.data();
+					ipfsData = {
+						ipfsHash: certData.ipfsHash,
+						ipfsUrl: certData.ipfsUrl,
+						pinataUrl: certData.pinataUrl
+					};
+					console.log(`Certificate already exists for token ${tokenId}: ${certData.ipfsUrl}`);
+				}
+			} catch (certError) {
+				console.error('Error checking existing certificate:', certError);
+			}
+		}
+
+		// Generate personalized ownership card if this is a new mint and certificate doesn't exist
+		if (nftMinted && transactionHash && !certificateExists) {
+			try {
+				const imageName = `ownership_card_${docId}_${tokenId}_${Date.now()}.png`;
+				const imagePath = path.join(__dirname, 'generated_images', imageName);
+
+				await generateOwnershipCard(name, tokenId, imagePath);
+				localImageUrl = `/images/${imageName}`;
+
+				// Upload to IPFS via Pinata
+				try {
+					ipfsData = await uploadToIPFS(imagePath, imageName);
+					console.log(`Generated and uploaded ownership card for ${name} with Token ID ${tokenId}:`, ipfsData.ipfsUrl);
+
+					// Store certificate in certificates collection
+					await db.collection('certificates').doc(tokenId.toString()).set({
+						tokenId: tokenId.toString(),
+						ipfsUrl: ipfsData.ipfsUrl,
+						ipfsHash: ipfsData.ipfsHash,
+						pinataUrl: ipfsData.pinataUrl,
+						createdAt: new Date().toISOString(),
+						isAirdrop: isAirdrop || false
+					});
+				} catch (ipfsError) {
+					console.error('IPFS upload failed, using local storage:', ipfsError);
+					// Store with just local URL if IPFS fails
+					await db.collection('certificates').doc(tokenId.toString()).set({
+						tokenId: tokenId.toString(),
+						localImageUrl: localImageUrl,
+						createdAt: new Date().toISOString(),
+						isAirdrop: isAirdrop || false
+					});
+				}
+			} catch (imageError) {
+				console.error('Failed to generate ownership card:', imageError);
+			}
+		}
+
+		// Variable to track email sending result
+		let emailSent = false;
+
+		if (doc.exists) {
+			const existingData = doc.data();
+
+			if (nftMinted && transactionHash) {
+				const newMint = {
+					transactionHash: transactionHash,
+					tokenId: tokenId,
+					mintedAt: mintedAt || new Date().toISOString(),
+					certificateIpfsHash: ipfsData?.ipfsHash,
+					certificateIpfsUrl: ipfsData?.ipfsUrl,
+					certificatePinataUrl: ipfsData?.pinataUrl,
+					ownershipCardUrl: localImageUrl,
+					termsAccepted: termsAccepted || true,
+					termsAcceptedAt: new Date().toISOString(),
+					privacyPolicyAccepted: privacyPolicyAccepted || false,
+					privacyPolicyAcceptedAt: privacyPolicyAccepted ? new Date().toISOString() : null,
+					ageConfirmed: ageConfirmed || false,
+					ageConfirmedAt: ageConfirmed ? new Date().toISOString() : null,
+					subscribeNewsletter: subscribe || false,
+					subscribeNewsletterAt: subscribe ? new Date().toISOString() : null,
+					isAirdrop: isAirdrop || false,
+					certificateAlreadyExisted: certificateExists
+				};
+
+				const currentMints = existingData.mints || [];
+				currentMints.push(newMint);
+
+				const updateData = {
+					name: name || existingData.name,
+					walletAddress: walletAddress || existingData.walletAddress,
+					nftMinted: true,
+					totalMinted: currentMints.length,
+					mints: currentMints,
+					lastMintedAt: mintedAt || new Date().toISOString(),
+					updatedAt: new Date().toISOString(),
+					subscribeNewsletter: subscribe || existingData.subscribeNewsletter || false,
+					subscribeNewsletterAt: subscribe ? new Date().toISOString() : (existingData.subscribeNewsletterAt || null)
+				};
+
+				console.log('Updating user with airdrop data:', { tokenId, isAirdrop, certificateExists });
+
+				await userRef.update(updateData);
+
+				// Send email for existing user with new mint
+				if (name && email) {
+					try {
+						const emailResult = await sendMintSuccessEmail(
+							email,
+							name,
+							tokenId,
+							ipfsData?.ipfsUrl || localImageUrl,
+							isAirdrop
+						);
+
+						emailSent = emailResult.success;
+
+						if (emailResult.success) {
+							console.log(`✅ Mint success email sent to ${email}`);
+						} else {
+							console.error(`❌ Failed to send email to ${email}:`, emailResult.error);
+						}
+					} catch (emailError) {
+						console.error('Error in email sending process:', emailError);
+						emailSent = false;
+					}
+				}
+
+				return res.status(200).json({
+					success: true,
+					message: certificateExists ?
+						'User data updated with existing certificate' :
+						'User data updated with new mint information',
+					userId: docId,
+					tokenId: tokenId,
+					certificateIpfsUrl: ipfsData?.ipfsUrl,
+					ownershipCardUrl: localImageUrl,
+					ipfsHash: ipfsData?.ipfsHash,
+					totalMinted: currentMints.length,
+					subscribeNewsletter: subscribe || false,
+					isAirdrop: isAirdrop || false,
+					certificateAlreadyExisted: certificateExists,
+					emailSent: emailSent
+				});
+			} else {
+				return res.status(200).json({
+					success: true,
+					message: 'User already exists',
+					userId: docId,
+					userData: existingData,
+					emailSent: false
+				});
+			}
+		}
+
+		// Add new user
+		if (!name) {
+			return res.status(400).json({ error: 'Name is required for new user' });
+		}
+
+		const userData = {
+			name,
+			email,
+			createdAt: new Date().toISOString(),
+			nftMinted: nftMinted || false,
+			totalMinted: 0,
+			mints: [],
+			termsAccepted: termsAccepted || (nftMinted || false),
+			termsAcceptedAt: (termsAccepted || nftMinted) ? new Date().toISOString() : null,
+			privacyPolicyAccepted: privacyPolicyAccepted || false,
+			privacyPolicyAcceptedAt: privacyPolicyAccepted ? new Date().toISOString() : null,
+			ageConfirmed: ageConfirmed || false,
+			ageConfirmedAt: ageConfirmed ? new Date().toISOString() : null,
+			subscribeNewsletter: subscribe || false,
+			subscribeNewsletterAt: subscribe ? new Date().toISOString() : null
+		};
+
+		if (walletAddress) userData.walletAddress = walletAddress;
+
+		if (nftMinted && transactionHash) {
+			const newMint = {
+				transactionHash: transactionHash,
+				tokenId: tokenId,
+				mintedAt: mintedAt || new Date().toISOString(),
+				certificateIpfsHash: ipfsData?.ipfsHash,
+				certificateIpfsUrl: ipfsData?.ipfsUrl,
+				certificatePinataUrl: ipfsData?.pinataUrl,
+				ownershipCardUrl: localImageUrl,
+				termsAccepted: termsAccepted || true,
+				termsAcceptedAt: new Date().toISOString(),
+				privacyPolicyAccepted: privacyPolicyAccepted || false,
+				privacyPolicyAcceptedAt: privacyPolicyAccepted ? new Date().toISOString() : null,
+				ageConfirmed: ageConfirmed || false,
+				ageConfirmedAt: ageConfirmed ? new Date().toISOString() : null,
+				subscribeNewsletter: subscribe || false,
+				subscribeNewsletterAt: subscribe ? new Date().toISOString() : null,
+				isAirdrop: isAirdrop || false,
+				certificateAlreadyExisted: certificateExists
+			};
+
+			userData.mints = [newMint];
+			userData.totalMinted = 1;
+			userData.lastMintedAt = mintedAt || new Date().toISOString();
+		}
+
+		// Send email for new user (only if NFT was minted)
+		if (nftMinted && transactionHash && name && email) {
+			try {
+				const emailResult = await sendMintSuccessEmail(
+					email,
+					name,
+					tokenId,
+					ipfsData?.ipfsUrl || localImageUrl,
+					isAirdrop
+				);
+
+				emailSent = emailResult.success;
+
+				if (emailResult.success) {
+					console.log(`✅ Mint success email sent to ${email}`);
+				} else {
+					console.error(`❌ Failed to send email to ${email}:`, emailResult.error);
+				}
+			} catch (emailError) {
+				console.error('Error in email sending process:', emailError);
+				emailSent = false;
+			}
+		}
+
+		console.log('Creating new user with airdrop data:', { isAirdrop, certificateExists });
+
+		await userRef.set(userData);
+
+		res.status(201).json({
+			success: true,
+			message: certificateExists ?
+				'User data stored with existing certificate' :
+				'User data stored successfully with new certificate',
+			userId: docId,
+			tokenId: tokenId,
+			certificateIpfsUrl: ipfsData?.ipfsUrl,
+			ownershipCardUrl: localImageUrl,
+			ipfsHash: ipfsData?.ipfsHash,
+			totalMinted: userData.totalMinted,
+			subscribeNewsletter: subscribe || false,
+			isAirdrop: isAirdrop || false,
+			certificateAlreadyExisted: certificateExists,
+			emailSent: emailSent
+		});
+
+	} catch (error) {
+		console.error('Error storing user data:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// In your backend (server.js), update the /api/users/wallet/:walletAddress endpoint:
+app.get('/api/users/wallet/:walletAddress', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		console.log(`Searching for wallet: ${walletAddress}`);
+
+		// Create a composite index on a lowercase version of walletAddress
+		// First, try to find by exact match
+		let usersSnapshot = await db.collection('users')
+			.where('walletAddress', '==', walletAddress)
+			.limit(1)
+			.get();
+
+		if (usersSnapshot.empty) {
+			// Try with lowercase
+			usersSnapshot = await db.collection('users')
+				.where('walletAddress', '==', walletAddress.toLowerCase())
+				.limit(1)
+				.get();
+		}
+
+		if (usersSnapshot.empty) {
+			console.log(`No user found for wallet: ${walletAddress}`);
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userDoc = usersSnapshot.docs[0];
+		res.json({
+			id: userDoc.id,
+			...userDoc.data()
+		});
+
+	} catch (error) {
+		console.error('Error fetching user by wallet:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Add this endpoint after your existing /api/admin/identity-documents endpoint
+
+app.get('/api/admin/tax-id-documents', cors(corsOptions), async (req, res) => {
+	try {
+		const {
+			page = 1,
+			limit = 10,
+			status = 'all',
+			search = '',
+			sortBy = 'uploadedAt',
+			sortOrder = 'desc'
+		} = req.query;
+
+		console.log('🔍 Fetching tax ID documents with filters:', { page, limit, status, search, sortBy, sortOrder });
+
+		// Get all users for name and email lookup first
+		const usersSnapshot = await db.collection('users').get();
+		const userLookup = {};
+		const emailLookup = {};
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			if (userData.walletAddress) {
+				userLookup[userData.walletAddress.toLowerCase()] = userData.name || 'Anonymous';
+				emailLookup[userData.walletAddress.toLowerCase()] = userData.email || 'No email';
+			}
+		});
+
+		// Get all paypal documents with taxIdDocument
+		const allPaypalSnapshot = await db.collection('paypal').get();
+
+		let allDocuments = [];
+
+		allPaypalSnapshot.forEach(doc => {
+			const data = doc.data();
+
+			// ✅ FIXED: Add the missing condition check
+			if (data.taxIdDocument && data.taxIdDocument.ipfsUrl) {
+				const document = {
+					id: doc.id,
+					walletAddress: data.walletAddress,
+					userName: userLookup[data.walletAddress?.toLowerCase()] || 'Unknown',
+					userEmail: emailLookup[data.walletAddress?.toLowerCase()] || 'No email',
+					taxIdType: data.taxIdDocument.taxIdType,
+					ipfsUrl: data.taxIdDocument.ipfsUrl,
+					uploadedAt: data.taxIdDocument.uploadedAt,
+					rejectionReason: data.taxIdDocument.rejectionReason || null,
+					rejectedAt: data.taxIdDocument.rejectedAt || null,
+					verified: data.taxIdDocument.verified || false,
+					verifiedAt: data.taxIdDocument.verifiedAt || null
+				};
+
+				allDocuments.push(document);
+			}
+		});
+
+		// Apply status filter
+		let filteredDocuments = allDocuments;
+
+		switch (status) {
+			case 'pending':
+				filteredDocuments = allDocuments.filter(doc => !doc.verified && !doc.rejectionReason);
+				break;
+			case 'approved':
+				filteredDocuments = allDocuments.filter(doc => doc.verified);
+				break;
+			case 'rejected':
+				filteredDocuments = allDocuments.filter(doc => doc.rejectionReason && !doc.verified);
+				break;
+			default: // 'all'
+				filteredDocuments = allDocuments;
+		}
+
+		// Apply search filter - now includes user name and email search
+		if (search) {
+			const searchLower = search.toLowerCase();
+			filteredDocuments = filteredDocuments.filter(doc =>
+				doc.walletAddress.toLowerCase().includes(searchLower) ||
+				doc.taxIdType.toLowerCase().includes(searchLower) ||
+				doc.userName.toLowerCase().includes(searchLower) ||
+				doc.userEmail.toLowerCase().includes(searchLower) ||
+				(doc.rejectionReason && doc.rejectionReason.toLowerCase().includes(searchLower))
+			);
+		}
+
+		// Apply sorting
+		filteredDocuments.sort((a, b) => {
+			let aVal = a[sortBy];
+			let bVal = b[sortBy];
+
+			// Handle date sorting
+			if (sortBy.includes('At')) {
+				aVal = new Date(aVal || 0);
+				bVal = new Date(bVal || 0);
+			}
+
+			if (sortOrder === 'desc') {
+				return bVal > aVal ? 1 : -1;
+			} else {
+				return aVal > bVal ? 1 : -1;
+			}
+		});
+
+		// Calculate pagination
+		const totalDocuments = filteredDocuments.length;
+		const totalPages = Math.ceil(totalDocuments / limit);
+		const offset = (page - 1) * limit;
+		const paginatedDocuments = filteredDocuments.slice(offset, offset + parseInt(limit));
+
+		// Calculate stats
+		const stats = {
+			total: allDocuments.length,
+			pending: allDocuments.filter(doc => !doc.verified && !doc.rejectionReason).length,
+			approved: allDocuments.filter(doc => doc.verified).length,
+			rejected: allDocuments.filter(doc => doc.rejectionReason && !doc.verified).length
+		};
+
+		res.json({
+			success: true,
+			documents: paginatedDocuments,
+			pagination: {
+				currentPage: parseInt(page),
+				totalPages: totalPages,
+				totalDocuments: totalDocuments,
+				limit: parseInt(limit),
+				hasNextPage: page < totalPages,
+				hasPrevPage: page > 1
+			},
+			stats: stats
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching tax ID documents:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Get minted users endpoint
+app.get('/api/users/minted', cors(corsOptions), async (req, res) => {
+	try {
+		const usersSnapshot = await db.collection('users').where('nftMinted', '==', true).get();
+		const mintedUsers = [];
+
+		usersSnapshot.forEach(doc => {
+			mintedUsers.push({
+				id: doc.id,
+				...doc.data()
+			});
+		});
+
+		res.json({
+			success: true,
+			count: mintedUsers.length,
+			users: mintedUsers
+		});
+	} catch (error) {
+		console.error('Error fetching minted users:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Endpoint to regenerate ownership card (for testing/admin purposes)
+app.post('/api/generate-card', cors(corsOptions), async (req, res) => {
+	try {
+		const { name, email, tokenId } = req.body; // Add tokenId here
+
+		if (!name || !email) {
+			return res.status(400).json({ error: 'Name and email are required' });
+		}
+
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+		const imageName = `ownership_card_${docId}_${Date.now()}.png`;
+		const imagePath = path.join(__dirname, 'generated_images', imageName);
+
+		// Pass tokenId to generateOwnershipCard function
+		await generateOwnershipCard(name, tokenId || 0, imagePath);
+		const localImageUrl = `/images/${imageName}`;
+
+		// Try to upload to IPFS
+		let ipfsData = null;
+		try {
+			ipfsData = await uploadToIPFS(imagePath, imageName);
+		} catch (ipfsError) {
+			console.error('IPFS upload failed:', ipfsError);
+		}
+
+		res.json({
+			success: true,
+			message: 'Ownership card generated successfully',
+			imageUrl: localImageUrl,
+			certificateIpfsUrl: ipfsData?.ipfsUrl,
+			ipfsHash: ipfsData?.ipfsHash,
+			tokenId: tokenId
+		});
+
+	} catch (error) {
+		console.error('Error generating ownership card:', error);
+		res.status(500).json({ error: 'Failed to generate ownership card' });
+	}
+});
+
+// New endpoint to download certificate
+app.get('/api/download-certificate/:email', cors(corsOptions), async (req, res) => {
+	try {
+		const email = req.params.email;
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+		const userDoc = await db.collection('users').doc(docId).get();
+
+		if (!userDoc.exists) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = userDoc.data();
+
+		if (!userData.nftMinted) {
+			return res.status(400).json({ error: 'User has not minted an NFT' });
+		}
+
+		// Try to get certificate from IPFS first, then fallback to local
+		if (userData.certificateIpfsUrl) {
+			try {
+				const response = await axios.get(userData.certificateIpfsUrl, {
+					responseType: 'arraybuffer'
+				});
+
+				res.set({
+					'Content-Type': 'image/png',
+					'Content-Disposition': `attachment; filename="ownership_certificate_${userData.name.replace(/[^a-z0-9]/gi, '_')}.png"`
+				});
+
+				return res.send(Buffer.from(response.data));
+			} catch (ipfsError) {
+				console.error('Failed to fetch from IPFS, trying local file:', ipfsError);
+			}
+		}
+
+		// Fallback to local file
+		if (userData.ownershipCardUrl) {
+			const localPath = path.join(__dirname, userData.ownershipCardUrl.replace('/images/', 'generated_images/'));
+
+			if (fs.existsSync(localPath)) {
+				res.set({
+					'Content-Type': 'image/png',
+					'Content-Disposition': `attachment; filename="ownership_certificate_${userData.name.replace(/[^a-z0-9]/gi, '_')}.png"`
+				});
+
+				return res.sendFile(localPath);
+			}
+		}
+
+		return res.status(404).json({ error: 'Certificate file not found' });
+
+	} catch (error) {
+		console.error('Error downloading certificate:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+app.put('/api/users/:email/update-name', cors(corsOptions), async (req, res) => {
+	try {
+		const { email } = req.params;
+		const { newName, tokenId } = req.body;
+
+		if (!newName || !tokenId) {
+			return res.status(400).json({ error: 'New name and token ID are required' });
+		}
+
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+		const userRef = db.collection('users').doc(docId);
+
+		// Check if user exists
+		const doc = await userRef.get();
+		if (!doc.exists) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = doc.data();
+
+		// Generate new certificate with updated name
+		const imageName = `ownership_card_${docId}_${tokenId}_${Date.now()}.png`;
+		const imagePath = path.join(__dirname, 'generated_images', imageName);
+
+		await generateOwnershipCard(newName, tokenId, imagePath);
+		const localImageUrl = `/images/${imageName}`;
+
+		// Try to upload to IPFS
+		let ipfsData = null;
+		try {
+			ipfsData = await uploadToIPFS(imagePath, imageName);
+		} catch (ipfsError) {
+			console.error('IPFS upload failed:', ipfsError);
+		}
+
+		// Update certificate in certificates collection
+		if (ipfsData) {
+			await db.collection('certificates').doc(tokenId.toString()).set({
+				tokenId: tokenId.toString(),
+				ipfsUrl: ipfsData.ipfsUrl
+			});
+		}
+
+		// Update user data
+		const updateData = {
+			name: newName,
+			updatedAt: new Date().toISOString()
+		};
+
+		// Update the specific mint record if it exists in mints array
+		if (userData.mints && Array.isArray(userData.mints)) {
+			const updatedMints = userData.mints.map(mint => {
+				if (mint.tokenId === tokenId) {
+					return {
+						...mint,
+						certificateIpfsHash: ipfsData?.ipfsHash || mint.certificateIpfsHash,
+						certificateIpfsUrl: ipfsData?.ipfsUrl || mint.certificateIpfsUrl,
+						certificatePinataUrl: ipfsData?.pinataUrl || mint.certificatePinataUrl,
+						ownershipCardUrl: localImageUrl,
+						updatedAt: new Date().toISOString()
+					};
+				}
+				return mint;
+			});
+			updateData.mints = updatedMints;
+		}
+
+		// Update legacy fields if they exist
+		if (userData.certificateIpfsUrl || userData.ownershipCardUrl) {
+			updateData.certificateIpfsHash = ipfsData?.ipfsHash;
+			updateData.certificateIpfsUrl = ipfsData?.ipfsUrl;
+			updateData.certificatePinataUrl = ipfsData?.pinataUrl;
+			updateData.ownershipCardUrl = localImageUrl;
+		}
+
+		await userRef.update(updateData);
+
+		res.json({
+			success: true,
+			message: 'User name and certificate updated successfully',
+			newName: newName,
+			certificateIpfsUrl: ipfsData?.ipfsUrl,
+			ownershipCardUrl: localImageUrl,
+			ipfsHash: ipfsData?.ipfsHash
+		});
+
+	} catch (error) {
+		console.error('Error updating user name:', error);
+		res.status(500).json({ error: 'Failed to update user name' });
+	}
+});
+
+app.post('/api/certificates', cors(corsOptions), async (req, res) => {
+	try {
+		const { tokenId, ipfsUrl } = req.body;
+
+		if (!tokenId || !ipfsUrl) {
+			return res.status(400).json({ error: 'Token ID and IPFS URL are required' });
+		}
+
+		const certRef = db.collection('certificates').doc(tokenId.toString());
+
+		await certRef.set({
+			tokenId: tokenId.toString(),
+			ipfsUrl: ipfsUrl
+		});
+
+		res.status(201).json({
+			success: true,
+			message: 'Certificate stored successfully',
+			tokenId: tokenId
+		});
+
+	} catch (error) {
+		console.error('Error storing certificate:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+app.post('/api/certificates/batch', cors(corsOptions), async (req, res) => {
+	try {
+		const { tokenIds } = req.body;
+
+		if (!tokenIds || !Array.isArray(tokenIds)) {
+			return res.status(400).json({ error: 'Array of token IDs is required' });
+		}
+
+		const certificates = [];
+
+		// Use Promise.all to fetch all certificates in parallel
+		await Promise.all(tokenIds.map(async (tokenId) => {
+			const certDoc = await db.collection('certificates').doc(tokenId.toString()).get();
+			if (certDoc.exists) {
+				certificates.push(certDoc.data());
+			}
+		}));
+
+		res.json({
+			success: true,
+			count: certificates.length,
+			certificates: certificates
+		});
+	} catch (error) {
+		console.error('Error fetching batch certificates:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// New endpoint to download archive (all certificates + Autograph and Coin folder)
+// Replace the existing /api/users/:email/download-archive endpoint with this version
+app.get('/api/users/:email/download-archive', cors(corsOptions), async (req, res) => {
+	try {
+		const email = req.params.email;
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+		console.log(`Archive download requested for email: ${email}`);
+
+		// 1. Get user data to verify existence
+		const userDoc = await db.collection('users').doc(docId).get();
+		if (!userDoc.exists) {
+			console.log('User not found');
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = userDoc.data();
+		console.log(`User found: ${userData.name}`);
+
+		if (!userData.walletAddress) {
+			console.log('No wallet address found for user');
+			return res.status(400).json({ error: 'No wallet address associated with this user' });
+		}
+
+		// 2. Get CURRENTLY OWNED token IDs from blockchain
+		let currentlyOwnedTokenIds = [];
+		let usedBlockchainData = false;
+
+		try {
+			currentlyOwnedTokenIds = await getCurrentlyOwnedTokenIds(userData.walletAddress);
+			usedBlockchainData = true;
+			console.log(`Found ${currentlyOwnedTokenIds.length} currently owned token IDs from blockchain:`, currentlyOwnedTokenIds);
+		} catch (blockchainError) {
+			console.error('Error checking blockchain for owned tokens:', blockchainError.message);
+
+			// Fallback: Check individual tokens from user's mint history
+			if (userData.mints && Array.isArray(userData.mints)) {
+				console.log('Falling back to individual token ownership verification');
+
+				const verificationPromises = userData.mints.map(async (mint) => {
+					if (mint.tokenId) {
+						try {
+							const isOwned = await isTokenOwnedByWallet(mint.tokenId, userData.walletAddress);
+							return isOwned ? mint.tokenId.toString() : null;
+						} catch (error) {
+							console.error(`Failed to verify ownership of token ${mint.tokenId}:`, error.message);
+							return null;
+						}
+					}
+					return null;
+				});
+
+				const verificationResults = await Promise.all(verificationPromises);
+				currentlyOwnedTokenIds = verificationResults.filter(tokenId => tokenId !== null);
+				console.log(`Verified ${currentlyOwnedTokenIds.length} owned tokens individually:`, currentlyOwnedTokenIds);
+			}
+
+			if (currentlyOwnedTokenIds.length === 0) {
+				console.warn('Could not verify any owned tokens - user may not own any NFTs currently');
+			}
+		}
+
+		// 3. Set up the zip archive
+		res.set({
+			'Content-Type': 'application/zip',
+			'Content-Disposition': `attachment; filename="hope_archive_${userData.name?.replace(/[^a-z0-9]/gi, '_') || 'user'}.zip"`,
+			'Cache-Control': 'no-cache'
+		});
+
+		const archive = archiver('zip', { zlib: { level: 9 } });
+
+		archive.on('error', (err) => {
+			console.error('Archive error:', err);
+			if (!res.headersSent) {
+				res.status(500).send('Error creating archive');
+			}
+		});
+
+		archive.pipe(res);
+
+		// 4. Get certificates - only for currently owned token IDs
+		let addedCount = 0;
+
+		if (currentlyOwnedTokenIds.length > 0) {
+			// Try to get certificates from certificates collection first
+			try {
+				// Split into chunks of 10 for Firestore 'in' query limit
+				const chunks = [];
+				for (let i = 0; i < currentlyOwnedTokenIds.length; i += 10) {
+					chunks.push(currentlyOwnedTokenIds.slice(i, i + 10));
+				}
+
+				const allCertificates = [];
+				for (const chunk of chunks) {
+					const certificatesSnapshot = await db.collection('certificates')
+						.where('tokenId', 'in', chunk)
+						.get();
+
+					certificatesSnapshot.docs.forEach(doc => {
+						allCertificates.push(doc.data());
+					});
+				}
+
+				console.log(`Found ${allCertificates.length} certificates in certificates collection`);
+
+				// Add certificates from certificates collection
+				const downloadPromises = allCertificates.map(async (certData) => {
+					try {
+						if (certData.ipfsUrl) {
+							console.log(`Downloading certificate for token ${certData.tokenId} from IPFS`);
+							const response = await axios.get(certData.ipfsUrl, {
+								responseType: 'arraybuffer',
+								timeout: 30000,
+								maxRedirects: 5
+							});
+							archive.append(Buffer.from(response.data), {
+								name: `Certificates/ownership_certificate_token_${certData.tokenId}.png`
+							});
+							addedCount++;
+							console.log(`Successfully added certificate for token ${certData.tokenId}`);
+						}
+					} catch (error) {
+						console.error(`Failed to download certificate for token ${certData.tokenId}:`, error.message);
+					}
+				});
+
+				await Promise.all(downloadPromises);
+			} catch (error) {
+				console.error('Error with certificates collection query:', error.message);
+			}
+
+			// If no certificates found in certificates collection, try user mints data
+			if (addedCount === 0 && userData.mints) {
+				console.log('No certificates found in certificates collection, trying user mints data');
+
+				const mintPromises = userData.mints
+					.filter(mint => currentlyOwnedTokenIds.includes(mint.tokenId.toString()))
+					.map(async (mint) => {
+						try {
+							if (mint.certificateIpfsUrl) {
+								console.log(`Downloading certificate for token ${mint.tokenId} from user mint data`);
+								const response = await axios.get(mint.certificateIpfsUrl, {
+									responseType: 'arraybuffer',
+									timeout: 30000,
+									maxRedirects: 5
+								});
+								archive.append(Buffer.from(response.data), {
+									name: `Certificates/ownership_certificate_token_${mint.tokenId}.png`
+								});
+								addedCount++;
+							} else if (mint.ownershipCardUrl) {
+								// Try local file
+								const localPath = path.join(__dirname, mint.ownershipCardUrl.replace('/images/', 'generated_images/'));
+								if (fs.existsSync(localPath)) {
+									console.log(`Adding local certificate for token ${mint.tokenId}`);
+									archive.file(localPath, {
+										name: `Certificates/ownership_certificate_token_${mint.tokenId}.png`
+									});
+									addedCount++;
+								}
+							}
+						} catch (error) {
+							console.error(`Failed to download certificate for token ${mint.tokenId} from mint data:`, error.message);
+						}
+					});
+
+				await Promise.all(mintPromises);
+			}
+		}
+
+		// 5. Add Autograph and Coin folder if exists
+		const signAndSongPath = path.join(__dirname, 'Autograph and Coin');
+		if (fs.existsSync(signAndSongPath)) {
+			console.log('Adding Autograph and Coin folder');
+			archive.directory(signAndSongPath, 'Autograph and Coin');
+		} else {
+			console.warn('Autograph and Coin folder not found');
+			archive.append('Additional content folder not found. Please contact support if you believe this content should be available.', {
+				name: 'Autograph and Coin/README.txt'
+			});
+		}
+
+		// 6. Add a comprehensive README file with user info
+		const readmeContent = `MUSE Archive for ${userData.name}
+========================================
+
+User Information:
+- Name: ${userData.name}
+- Email: ${userData.email || 'N/A'}
+- Wallet Address: ${userData.walletAddress || 'N/A'}
+
+Ownership Information:
+- Total NFTs Currently Owned: ${currentlyOwnedTokenIds.length}
+- Token IDs Currently Owned: ${currentlyOwnedTokenIds.length > 0 ? currentlyOwnedTokenIds.join(', ') : 'None'}
+- Certificates Included: ${addedCount}
+- Data Source: ${usedBlockchainData ? 'Blockchain (Live)' : 'Database with Individual Verification'}
+
+Archive Details:
+- Generated: ${new Date().toISOString()}
+- Archive Version: 2.0
+
+Contents:
+1. /Certificates/ - Your ownership certificates for currently owned NFTs
+2. /Autograph and Coin/ - Additional project content and assets
+
+Notes:
+- This archive only includes certificates for NFTs you currently own
+- If you previously owned NFTs that were transferred/sold, those certificates are not included
+- If you believe there's an error with your certificates, please contact support
+
+Support: Contact the MUSE team for any issues with your archive
+`;
+		//archive.append(readmeContent, { name: 'README.txt' });
+
+		console.log(`Added ${addedCount} certificates to archive for ${currentlyOwnedTokenIds.length} owned tokens`);
+
+		// Add status information
+		if (currentlyOwnedTokenIds.length === 0) {
+			archive.append(`No NFTs Currently Owned
+
+This wallet address does not currently own any MUSE NFTs.
+This could mean:
+1. No NFTs were ever minted to this address
+2. NFTs were transferred/sold to other addresses
+3. There may be a technical issue
+
+If you believe this is incorrect, please contact support with:
+- Your wallet address: ${userData.walletAddress}
+- Your email: ${userData.email}
+- Transaction hashes of your mints
+
+Generated: ${new Date().toISOString()}`, {
+				name: 'Certificates/NO_NFTS_CURRENTLY_OWNED.txt'
+			});
+		} else if (addedCount === 0) {
+			archive.append(`Certificates Not Found
+
+You currently own ${currentlyOwnedTokenIds.length} NFT(s) with token ID(s): ${currentlyOwnedTokenIds.join(', ')}
+
+However, no certificate files could be retrieved. This may be due to:
+1. IPFS connectivity issues
+2. Certificate files not being properly stored
+3. Technical issues with certificate generation
+
+Please contact support with this information:
+- Your wallet address: ${userData.walletAddress}
+- Your email: ${userData.email}
+- Token IDs: ${currentlyOwnedTokenIds.join(', ')}
+
+Generated: ${new Date().toISOString()}`, {
+				name: 'Certificates/CERTIFICATES_NOT_FOUND.txt'
+			});
+		}
+
+		archive.finalize();
+
+	} catch (error) {
+		console.error('Error creating archive:', error);
+		if (!res.headersSent) {
+			res.status(500).json({
+				error: 'Failed to create archive',
+				details: error.message
+			});
+		}
+	}
+});
+
+
+app.get('/api/token/:tokenId', cors(corsOptions), async (req, res) => {
+	try {
+		const tokenId = req.params.tokenId;
+
+		// Get token URI
+		const tokenURI = await nftContract.methods.tokenURI(tokenId).call();
+
+		// Get owner address
+		const owner = await nftContract.methods.ownerOf(tokenId).call();
+
+		res.json({
+			tokenId,
+			tokenURI,
+			owner,
+			contractAddress
+		});
+	} catch (error) {
+		console.error('Error fetching token metadata:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Add a new endpoint to get wallet info
+app.get('/api/wallet/:walletAddress', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		console.log("walletAddress in get method:", walletAddress);
+
+		// Use the correct method for your contract
+		const tokenIds = await getCurrentlyOwnedTokenIds(walletAddress);
+
+		res.json({
+			walletAddress,
+			balance: tokenIds.length,
+			tokenIds,
+			method: 'userMinted + walletToTokenIds + ownerOf verification'
+		});
+
+	} catch (error) {
+		console.error('Error fetching wallet info:', error);
+		res.status(500).json({
+			error: 'Failed to fetch wallet info',
+			details: error.message
+		});
+	}
+});
+
+
+// You'll need to add this helper function to check current ownership on-chain
+// Replace your getCurrentlyOwnedTokenIds function with this improved version:
+
+async function getCurrentlyOwnedTokenIds(walletAddress) {
+	try {
+		console.log(`Checking ownership for wallet: ${walletAddress}`);
+
+		// Use getWalletTokenIds directly - your contract handles transfers correctly
+		const tokenIds = await nftContract.methods.getWalletTokenIds(walletAddress).call();
+		console.log(`Found tokens for ${walletAddress}:`, tokenIds);
+
+		return tokenIds.map(id => id.toString());
+
+	} catch (error) {
+		console.error('Error in getCurrentlyOwnedTokenIds:', error.message);
+		throw error;
+	}
+}
+
+async function isTokenOwnedByWallet(tokenId, walletAddress) {
+	try {
+		const owner = await nftContract.methods.ownerOf(tokenId).call();
+		return owner.toLowerCase() === walletAddress.toLowerCase();
+	} catch (error) {
+		console.error(`Error checking ownership of token ${tokenId}:`, error.message);
+		return false; // Assume not owned if we can't verify
+	}
+}
+
+app.post('/api/test-email', cors(corsOptions), async (req, res) => {
+	try {
+		const { email, name } = req.body;
+
+		if (!email) {
+			return res.status(400).json({ error: 'Email is required' });
+		}
+
+		// Use default name if not provided
+		const testName = name || 'Test User';
+		const testTokenId = 99999; // Test token ID
+		const testCertificateUrl = 'https://example.com/test-certificate.png'; // Test certificate URL
+
+		console.log(`Sending test email to: ${email}`);
+
+		// Send test email
+		const emailResult = await sendMintSuccessEmail(
+			email,
+			testName,
+			testTokenId,
+			testCertificateUrl,
+			false // isAirdrop = false for regular mint test
+		);
+
+		if (emailResult.success) {
+			console.log(`✅ Test email sent successfully to ${email}`);
+			res.json({
+				success: true,
+				message: 'Test email sent successfully',
+				email: email,
+				name: testName,
+				messageId: emailResult.messageId
+			});
+		} else {
+			console.error(`❌ Failed to send test email to ${email}:`, emailResult.error);
+			res.status(500).json({
+				success: false,
+				error: 'Failed to send test email',
+				details: emailResult.error
+			});
+		}
+
+	} catch (error) {
+		console.error('Error sending test email:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+app.get('/api/certificates/:tokenId', cors(corsOptions), async (req, res) => {
+	try {
+		const tokenId = req.params.tokenId;
+		const certDoc = await db.collection('certificates').doc(tokenId).get();
+
+		if (!certDoc.exists) {
+			return res.status(404).json({ error: 'Certificate not found' });
+		}
+
+		res.json(certDoc.data());
+	} catch (error) {
+		console.error('Error fetching certificate:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+const getUserWithdrawalsByDisbursement = async (walletAddress) => {
+	try {
+		console.log(`🔍 Fetching withdrawal history for wallet: ${walletAddress}`);
+
+		// Get PayPal document for this wallet
+		const paypalDoc = await db.collection('paypal')
+			.doc(walletAddress.toLowerCase())
+			.get();
+
+		if (!paypalDoc.exists) {
+			console.log('📝 No PayPal data found for wallet');
+			return {
+				totalWithdrawnAllTime: 0,
+				withdrawalsByDisbursement: {},
+				payouts: []
+			};
+		}
+
+		const paypalData = paypalDoc.data();
+		const payouts = paypalData.payouts || [];
+
+		// Filter only completed payouts
+		const completedPayouts = payouts.filter(payout => 
+			payout.status === 'completed'
+		);
+
+		console.log(`📊 Found ${completedPayouts.length} completed payouts`);
+
+		// Calculate total withdrawn across all disbursements
+		const totalWithdrawnAllTime = completedPayouts.reduce((sum, payout) => {
+			return sum + (parseFloat(payout.amount) || 0);
+		}, 0);
+
+		// Group withdrawals by disbursement ID
+		const withdrawalsByDisbursement = {};
+		
+		completedPayouts.forEach(payout => {
+			const disbursementId = payout.disbursementId || 'unknown';
+			
+			if (!withdrawalsByDisbursement[disbursementId]) {
+				withdrawalsByDisbursement[disbursementId] = 0;
+			}
+			
+			withdrawalsByDisbursement[disbursementId] += parseFloat(payout.amount) || 0;
+		});
+
+		console.log('📊 Withdrawals by disbursement:', withdrawalsByDisbursement);
+		console.log('💰 Total withdrawn all time:', totalWithdrawnAllTime);
+
+		return {
+			totalWithdrawnAllTime: totalWithdrawnAllTime,
+			withdrawalsByDisbursement: withdrawalsByDisbursement,
+			payouts: completedPayouts
+		};
+
+	} catch (error) {
+		console.error('❌ Error fetching user withdrawals:', error);
+		return {
+			totalWithdrawnAllTime: 0,
+			withdrawalsByDisbursement: {},
+			payouts: [],
+			error: error.message
+		};
+	}
+};
+
+const calculateUserPayout = async (userData) => {
+	try {
+		console.log('🔍 Starting payout calculation for user:', userData?.email || 'unknown');
+
+		const userNFTsOwned = userData.totalMinted || 0;
+		console.log('📊 User NFTs owned:', userNFTsOwned);
+
+		// Get total supply from contract
+		let totalSupply = 0;
+		try {
+			const contractTotalSupply = await nftContract.methods.totalSupply().call();
+			totalSupply = Number(contractTotalSupply);
+			console.log('📊 Contract Total Supply:', totalSupply);
+
+			if (totalSupply <= 0) {
+				console.warn('⚠️ Total supply is 0, using fallback of 1');
+				totalSupply = 1;
+			}
+		} catch (contractError) {
+			console.error('❌ Error fetching total supply from contract:', contractError);
+			totalSupply = Math.max(userNFTsOwned, 1);
+			console.log('📊 Using fallback total supply:', totalSupply);
+		}
+
+		// Get CURRENT ACTIVE disbursement amount
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+		let currentDisbursementAmount = 0;
+		let currentDisbursementId = null;
+
+		if (limitsDoc.exists) {
+			const limitsData = limitsDoc.data();
+			currentDisbursementAmount = limitsData.totalLimit || 0;
+			currentDisbursementId = limitsData.disbursementId;
+			console.log('📊 Current Active Disbursement Amount:', currentDisbursementAmount);
+			console.log('📊 Current Disbursement ID:', currentDisbursementId);
+		} else {
+			console.warn('⚠️ No disbursement amount configured');
+		}
+
+		if (currentDisbursementAmount <= 0) {
+			console.warn('⚠️ No active disbursement amount set');
+			return {
+				availableAmount: 0,
+				totalEligible: 0,
+				totalWithdrawn: 0,
+				sharePercentage: 0,
+				disbursementAmount: 0,
+				totalSupply: totalSupply,
+				userNFTsOwned: userNFTsOwned,
+				error: 'No active disbursement pool configured'
+			};
+		}
+
+		// Calculate share percentage and eligible amount from CURRENT disbursement
+		const sharePercentage = userNFTsOwned / totalSupply;
+		const currentDisbursementEligible = currentDisbursementAmount * sharePercentage;
+
+		// Get user's withdrawal data using the helper function
+		const walletAddress = userData.walletAddress;
+		let totalWithdrawnAllTime = 0;
+		let withdrawnFromCurrentDisbursement = 0;
+
+		if (walletAddress) {
+			try {
+				const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
+				totalWithdrawnAllTime = withdrawalData.totalWithdrawnAllTime;
+
+				// Get amount withdrawn from current disbursement specifically
+				if (currentDisbursementId && withdrawalData.withdrawalsByDisbursement[currentDisbursementId]) {
+					withdrawnFromCurrentDisbursement = withdrawalData.withdrawalsByDisbursement[currentDisbursementId];
+				}
+
+				console.log('📊 Total withdrawn across all disbursements:', totalWithdrawnAllTime);
+				console.log('📊 Withdrawn from current disbursement:', withdrawnFromCurrentDisbursement);
+			} catch (error) {
+				console.error('Error fetching withdrawal history:', error);
+				totalWithdrawnAllTime = 0;
+				withdrawnFromCurrentDisbursement = 0;
+			}
+		}
+
+		// Available amount calculation:
+		// Can withdraw from current disbursement minus what's already withdrawn from current disbursement
+		const availableAmount = Math.max(0, currentDisbursementEligible - withdrawnFromCurrentDisbursement);
+
+		console.log('📊 Final Calculation:', {
+			userNFTs: userNFTsOwned,
+			totalSupply: totalSupply,
+			sharePercentage: (sharePercentage * 100).toFixed(3) + '%',
+			currentDisbursementAmount: currentDisbursementAmount,
+			currentDisbursementEligible: currentDisbursementEligible,
+			totalWithdrawnAllTime: totalWithdrawnAllTime,
+			withdrawnFromCurrentDisbursement: withdrawnFromCurrentDisbursement,
+			availableAmount: availableAmount
+		});
+
+		const result = {
+			availableAmount: Number(availableAmount.toFixed(2)),
+			totalEligible: Number(currentDisbursementEligible.toFixed(2)),
+			totalWithdrawn: Number(totalWithdrawnAllTime.toFixed(2)),
+			withdrawnFromCurrentDisbursement: Number(withdrawnFromCurrentDisbursement.toFixed(2)),
+			sharePercentage: Number((sharePercentage * 100).toFixed(3)),
+			disbursementAmount: Number(currentDisbursementAmount),
+			totalSupply: Number(totalSupply),
+			userNFTsOwned: Number(userNFTsOwned),
+			currentDisbursementId: currentDisbursementId
+		};
+
+		console.log('✅ Final calculation result:', result);
+		return result;
+
+	} catch (error) {
+		console.error('❌ Error calculating payout:', error);
+		return {
+			availableAmount: 0,
+			totalEligible: 0,
+			totalWithdrawn: 0,
+			sharePercentage: 0,
+			disbursementAmount: 0,
+			totalSupply: 0,
+			userNFTsOwned: userData?.totalMinted || 0,
+			error: error.message
+		};
+	}
+};
+
+// Get total payout pool from your system
+const getTotalPayoutPool = async () => {
+	try {
+		// You'll need to implement this based on your business logic
+		// This could come from:
+		// - Smart contract royalties
+		// - Sales revenue
+		// - Manual deposits by admin
+
+		const poolDoc = await db.collection('admin').doc('payoutPool').get();
+		if (poolDoc.exists) {
+			return poolDoc.data().totalAmount || 0;
+		}
+		return 0;
+	} catch (error) {
+		console.error('Error getting payout pool:', error);
+		return 0;
+	}
+};
+
+// Get user's payout history
+const getUserPayoutHistory = async (email) => {
+	try {
+		const payoutsSnapshot = await db.collection('payouts')
+			.where('userEmail', '==', email)
+			.orderBy('createdAt', 'desc')
+			.get();
+
+		const payouts = [];
+		payoutsSnapshot.forEach(doc => {
+			payouts.push({ id: doc.id, ...doc.data() });
+		});
+
+		return payouts;
+	} catch (error) {
+		console.error('Error fetching payout history:', error);
+		return [];
+	}
+};
+
+// ============================================
+// PAYOUT API ENDPOINTS
+// ============================================
+
+// Get user's payout information
+app.get('/api/users/:email/payout-info', cors(corsOptions), async (req, res) => {
+	try {
+		const email = req.params.email;
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+		// Get user data
+		const userDoc = await db.collection('users').doc(docId).get();
+		if (!userDoc.exists) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = userDoc.data();
+
+		// Calculate payout eligibility
+		const payoutInfo = await calculateUserPayout(userData);
+
+		// Get payout history
+		const payoutHistory = await getUserPayoutHistory(email);
+
+		res.json({
+			success: true,
+			payoutInfo: payoutInfo,
+			payoutHistory: payoutHistory,
+			hasPayPalEmail: !!userData.paypalEmail
+		});
+
+	} catch (error) {
+		console.error('Error fetching payout info:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// MAKE SURE you have this endpoint in your server.js
+
+// Admin endpoint to update identity document verification status - NO ADMIN KEY
+app.put('/api/admin/paypal/:walletAddress/verify-identity', cors(corsOptions), async (req, res) => {
+	try {
+		const { walletAddress } = req.params;
+		const { verified, rejectionReason } = req.body;
+
+		console.log(`🔍 Verifying identity document for wallet: ${walletAddress}`, { verified, rejectionReason });
+
+		// Find the document in the paypal collection
+		const paypalSnapshot = await db.collection('paypal')
+			.where('walletAddress', '==', walletAddress)
+			.limit(1)
+			.get();
+
+		if (paypalSnapshot.empty) {
+			return res.status(404).json({
+				error: 'Document not found for this wallet address'
+			});
+		}
+
+		const docRef = paypalSnapshot.docs[0].ref;
+		const updateData = {
+			'identityDocument.verified': verified,
+			'identityDocument.verifiedAt': verified ? new Date().toISOString() : null,
+			'identityDocument.rejectionReason': verified ? null : rejectionReason,
+			'identityDocument.rejectedAt': verified ? null : new Date().toISOString()
+		};
+
+		await docRef.update(updateData);
+
+		res.json({
+			success: true,
+			message: verified ? 'Identity document approved successfully' : 'Identity document rejected successfully',
+			verified: verified,
+			rejectionReason: rejectionReason || null
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating identity verification status:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+app.get('/api/admin/identity-documents', cors(corsOptions), async (req, res) => {
+	try {
+		const {
+			page = 1,
+			limit = 10,
+			status = 'all',
+			search = '',
+			sortBy = 'uploadedAt',
+			sortOrder = 'desc'
+		} = req.query;
+
+		console.log('🔍 Fetching identity documents with filters:', { page, limit, status, search, sortBy, sortOrder });
+
+		// Get all users for name lookup first
+		const usersSnapshot = await db.collection('users').get();
+		const userLookup = {};
+		const emailLookup = {};
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			if (userData.walletAddress) {
+				userLookup[userData.walletAddress.toLowerCase()] = userData.name || 'Anonymous';
+				emailLookup[userData.walletAddress.toLowerCase()] = userData.email || 'No email';
+			}
+		});
+
+		// Get all paypal documents with identityDocument
+		const allPaypalSnapshot = await db.collection('paypal').get();
+
+		let allDocuments = [];
+
+		allPaypalSnapshot.forEach(doc => {
+			const data = doc.data();
+
+			// ✅ FIXED: Check for correct structure in Firebase
+			if (data.identityDocument) {
+				// Handle both old and new data structures
+				let frontImageUrl = null;
+				let backImageUrl = null;
+
+				// New structure: identityDocument.frontImage.ipfsUrl
+				if (data.identityDocument.frontImage && data.identityDocument.frontImage.ipfsUrl) {
+					frontImageUrl = data.identityDocument.frontImage.ipfsUrl;
+				}
+				// Old structure: identityDocument.frontImageUrl (fallback)
+				else if (data.identityDocument.frontImageUrl) {
+					frontImageUrl = data.identityDocument.frontImageUrl;
+				}
+				// Legacy structure: identityDocument.ipfsUrl (single image)
+				else if (data.identityDocument.ipfsUrl) {
+					frontImageUrl = data.identityDocument.ipfsUrl;
+				}
+
+				// Back image check
+				if (data.identityDocument.backImage && data.identityDocument.backImage.ipfsUrl) {
+					backImageUrl = data.identityDocument.backImage.ipfsUrl;
+				}
+				else if (data.identityDocument.backImageUrl) {
+					backImageUrl = data.identityDocument.backImageUrl;
+				}
+
+				// Only include documents that have at least a front image
+				if (frontImageUrl) {
+					const document = {
+						id: doc.id,
+						walletAddress: data.walletAddress,
+						userName: userLookup[data.walletAddress?.toLowerCase()] || 'Unknown',
+						userEmail: emailLookup[data.walletAddress?.toLowerCase()] || 'No email',
+						documentType: data.identityDocument.documentType || 'identity_document',
+						frontImageUrl: frontImageUrl,
+						backImageUrl: backImageUrl,
+						hasBackImage: !!backImageUrl,
+						uploadedAt: data.identityDocument.uploadedAt,
+						rejectionReason: data.identityDocument.rejectionReason || null,
+						rejectedAt: data.identityDocument.rejectedAt || null,
+						verified: data.identityDocument.verified || false,
+						verifiedAt: data.identityDocument.verifiedAt || null
+					};
+
+					allDocuments.push(document);
+					console.log('✅ Found identity document for:', data.walletAddress, {
+						frontImage: !!frontImageUrl,
+						backImage: !!backImageUrl,
+						verified: document.verified
+					});
+				}
+			}
+		});
+
+		console.log(`📊 Total identity documents found: ${allDocuments.length}`);
+
+		// Apply status filter
+		let filteredDocuments = allDocuments;
+
+		switch (status) {
+			case 'pending':
+				filteredDocuments = allDocuments.filter(doc => !doc.verified && !doc.rejectionReason);
+				break;
+			case 'approved':
+				filteredDocuments = allDocuments.filter(doc => doc.verified);
+				break;
+			case 'rejected':
+				filteredDocuments = allDocuments.filter(doc => doc.rejectionReason && !doc.verified);
+				break;
+			default: // 'all'
+				filteredDocuments = allDocuments;
+		}
+
+		console.log(`📊 After status filter (${status}): ${filteredDocuments.length} documents`);
+
+		// Apply search filter - includes user name search
+		if (search) {
+			const searchLower = search.toLowerCase();
+			filteredDocuments = filteredDocuments.filter(doc =>
+				doc.walletAddress.toLowerCase().includes(searchLower) ||
+				doc.documentType.toLowerCase().includes(searchLower) ||
+				doc.userName.toLowerCase().includes(searchLower) ||
+				doc.userEmail.toLowerCase().includes(searchLower) ||
+				(doc.rejectionReason && doc.rejectionReason.toLowerCase().includes(searchLower))
+			);
+		}
+
+		// Apply sorting
+		filteredDocuments.sort((a, b) => {
+			let aVal = a[sortBy];
+			let bVal = b[sortBy];
+
+			// Handle date sorting
+			if (sortBy.includes('At')) {
+				aVal = new Date(aVal || 0);
+				bVal = new Date(bVal || 0);
+			}
+
+			if (sortOrder === 'desc') {
+				return bVal > aVal ? 1 : -1;
+			} else {
+				return aVal > bVal ? 1 : -1;
+			}
+		});
+
+		// Calculate pagination
+		const totalDocuments = filteredDocuments.length;
+		const totalPages = Math.ceil(totalDocuments / limit);
+		const offset = (page - 1) * limit;
+		const paginatedDocuments = filteredDocuments.slice(offset, offset + parseInt(limit));
+
+		// Calculate stats
+		const stats = {
+			total: allDocuments.length,
+			pending: allDocuments.filter(doc => !doc.verified && !doc.rejectionReason).length,
+			approved: allDocuments.filter(doc => doc.verified).length,
+			rejected: allDocuments.filter(doc => doc.rejectionReason && !doc.verified).length
+		};
+
+		console.log('📊 Final stats:', stats);
+		console.log('📊 Returning documents:', paginatedDocuments.length);
+
+		res.json({
+			success: true,
+			documents: paginatedDocuments,
+			pagination: {
+				currentPage: parseInt(page),
+				totalPages: totalPages,
+				totalDocuments: totalDocuments,
+				limit: parseInt(limit),
+				hasNextPage: page < totalPages,
+				hasPrevPage: page > 1
+			},
+			stats: stats
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching identity documents:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+app.post('/api/admin/search-users', cors(corsOptions), async (req, res) => {
+	try {
+		const { searchMethod, searchValue } = req.body;
+
+		if (!searchMethod || !searchValue) {
+			return res.status(400).json({
+				success: false,
+				error: 'Search method and value are required'
+			});
+		}
+
+		console.log('🔍 Admin user search:', { searchMethod, searchValue });
+
+		// Get all users from the users collection
+		const usersSnapshot = await db.collection('users').get();
+		let matchedUsers = [];
+
+		// Search through users based on method
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			const searchTerm = searchValue.toLowerCase().trim();
+
+			let isMatch = false;
+
+			switch (searchMethod) {
+				case 'wallet':
+					if (userData.walletAddress &&
+						userData.walletAddress.toLowerCase().includes(searchTerm)) {
+						isMatch = true;
+					}
+					break;
+
+				case 'name':
+					if (userData.name &&
+						userData.name.toLowerCase().includes(searchTerm)) {
+						isMatch = true;
+					}
+					break;
+
+				case 'email':
+					if (userData.email &&
+						userData.email.toLowerCase().includes(searchTerm)) {
+						isMatch = true;
+					}
+					break;
+
+				default:
+					console.warn('Unknown search method:', searchMethod);
+			}
+
+			if (isMatch) {
+				matchedUsers.push({
+					id: doc.id,
+					name: userData.name || null,
+					email: userData.email || null,
+					walletAddress: userData.walletAddress || null,
+					totalMinted: userData.totalMinted || 0,
+					nftMinted: userData.nftMinted || false,
+					createdAt: userData.createdAt || null
+				});
+			}
+		});
+
+		// Sort results by name, then by email
+		matchedUsers.sort((a, b) => {
+			const nameA = a.name || '';
+			const nameB = b.name || '';
+			if (nameA !== nameB) {
+				return nameA.localeCompare(nameB);
+			}
+			const emailA = a.email || '';
+			const emailB = b.email || '';
+			return emailA.localeCompare(emailB);
+		});
+
+		// Limit results to prevent overwhelming the UI
+		const maxResults = 50;
+		if (matchedUsers.length > maxResults) {
+			matchedUsers = matchedUsers.slice(0, maxResults);
+		}
+
+		console.log(`✅ Found ${matchedUsers.length} users matching search`);
+
+		res.json({
+			success: true,
+			users: matchedUsers,
+			totalFound: matchedUsers.length,
+			searchMethod: searchMethod,
+			searchValue: searchValue,
+			truncated: matchedUsers.length === maxResults
+		});
+
+	} catch (error) {
+		console.error('❌ Error searching users:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to search users',
+			details: error.message
+		});
+	}
+});
+
+app.post('/api/admin/search-users-advanced', cors(corsOptions), async (req, res) => {
+	try {
+		const { searchMethod, searchValue, exactMatch = false } = req.body;
+
+		if (!searchMethod || !searchValue) {
+			return res.status(400).json({
+				success: false,
+				error: 'Search method and value are required'
+			});
+		}
+
+		console.log('🔍 Advanced admin user search:', { searchMethod, searchValue, exactMatch });
+
+		// Get all users from the users collection
+		const usersSnapshot = await db.collection('users').get();
+		let matchedUsers = [];
+
+		// Helper function for fuzzy matching
+		const fuzzyMatch = (text, search) => {
+			if (!text) return false;
+			const textLower = text.toLowerCase();
+			const searchLower = search.toLowerCase();
+
+			// Exact match
+			if (textLower.includes(searchLower)) return true;
+
+			// If not exact match required, try fuzzy matching
+			if (!exactMatch) {
+				// Split search into words and check if all words are found
+				const searchWords = searchLower.split(' ').filter(word => word.length > 0);
+				return searchWords.every(word => textLower.includes(word));
+			}
+
+			return false;
+		};
+
+		// Search through users based on method
+		usersSnapshot.forEach(doc => {
+			const userData = doc.data();
+			const searchTerm = searchValue.trim();
+
+			let isMatch = false;
+			let matchScore = 0;
+
+			switch (searchMethod) {
+				case 'wallet':
+					if (userData.walletAddress) {
+						if (exactMatch) {
+							isMatch = userData.walletAddress.toLowerCase() === searchTerm.toLowerCase();
+							matchScore = isMatch ? 100 : 0;
+						} else {
+							isMatch = userData.walletAddress.toLowerCase().includes(searchTerm.toLowerCase());
+							matchScore = isMatch ?
+								(userData.walletAddress.toLowerCase().startsWith(searchTerm.toLowerCase()) ? 90 : 70) : 0;
+						}
+					}
+					break;
+
+				case 'name':
+					if (userData.name) {
+						isMatch = fuzzyMatch(userData.name, searchTerm);
+						if (isMatch) {
+							// Higher score for exact matches
+							if (userData.name.toLowerCase() === searchTerm.toLowerCase()) {
+								matchScore = 100;
+							} else if (userData.name.toLowerCase().startsWith(searchTerm.toLowerCase())) {
+								matchScore = 90;
+							} else {
+								matchScore = 70;
+							}
+						}
+					}
+					break;
+
+				case 'email':
+					if (userData.email) {
+						isMatch = fuzzyMatch(userData.email, searchTerm);
+						if (isMatch) {
+							// Higher score for exact matches
+							if (userData.email.toLowerCase() === searchTerm.toLowerCase()) {
+								matchScore = 100;
+							} else if (userData.email.toLowerCase().startsWith(searchTerm.toLowerCase())) {
+								matchScore = 90;
+							} else {
+								matchScore = 70;
+							}
+						}
+					}
+					break;
+
+				default:
+					console.warn('Unknown search method:', searchMethod);
+			}
+
+			if (isMatch) {
+				matchedUsers.push({
+					id: doc.id,
+					name: userData.name || null,
+					email: userData.email || null,
+					walletAddress: userData.walletAddress || null,
+					totalMinted: userData.totalMinted || 0,
+					nftMinted: userData.nftMinted || false,
+					createdAt: userData.createdAt || null,
+					matchScore: matchScore
+				});
+			}
+		});
+
+		// Sort by match score (highest first), then by name
+		matchedUsers.sort((a, b) => {
+			if (b.matchScore !== a.matchScore) {
+				return b.matchScore - a.matchScore;
+			}
+			const nameA = a.name || '';
+			const nameB = b.name || '';
+			return nameA.localeCompare(nameB);
+		});
+
+		// Limit results to prevent overwhelming the UI
+		const maxResults = 50;
+		if (matchedUsers.length > maxResults) {
+			matchedUsers = matchedUsers.slice(0, maxResults);
+		}
+
+		console.log(`✅ Found ${matchedUsers.length} users matching advanced search`);
+
+		res.json({
+			success: true,
+			users: matchedUsers,
+			totalFound: matchedUsers.length,
+			searchMethod: searchMethod,
+			searchValue: searchValue,
+			exactMatch: exactMatch,
+			truncated: matchedUsers.length === maxResults
+		});
+
+	} catch (error) {
+		console.error('❌ Error in advanced user search:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to search users',
+			details: error.message
+		});
+	}
+});
+
+
+app.put('/api/paypal/:walletAddress/email', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { paypalEmail } = req.body;
+
+		console.log('🔧 DEBUGGING PayPal Email Update Backend:');
+		console.log('Wallet Address:', walletAddress);
+		console.log('New PayPal Email:', paypalEmail);
+
+		// Validate PayPal email format
+		const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+		if (!emailRegex.test(paypalEmail)) {
+			return res.status(400).json({ error: 'Invalid PayPal email format' });
+		}
+
+		// Use wallet address as document ID (lowercase for consistency)
+		const docId = walletAddress.toLowerCase();
+		const paypalRef = db.collection('paypal').doc(docId);
+
+		// Check if document exists
+		const doc = await paypalRef.get();
+
+		if (doc.exists) {
+			// Update existing PayPal record
+			await paypalRef.update({
+				paypalEmail: paypalEmail.toLowerCase(),
+				updatedAt: new Date().toISOString()
+			});
+			console.log('✅ Updated existing PayPal record');
+		} else {
+			// Create new PayPal record
+			await paypalRef.set({
+				walletAddress: walletAddress.toLowerCase(),
+				paypalEmail: paypalEmail.toLowerCase(),
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				payouts: [] // Initialize empty payouts array
+			});
+			console.log('✅ Created new PayPal record');
+		}
+
+		res.json({
+			success: true,
+			message: 'PayPal email updated successfully',
+			paypalEmail: paypalEmail.toLowerCase()
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating PayPal email:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// 2. ADD: Get PayPal data endpoint
+app.get('/api/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		console.log('🔧 Backend: Fetching PayPal data for wallet:', walletAddress);
+
+		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+
+		if (!paypalDoc.exists) {
+			console.log('📝 Backend: No PayPal data found');
+			return res.status(404).json({
+				error: 'PayPal data not found',
+				paypalEmail: null,
+				payouts: []
+			});
+		}
+
+		const data = paypalDoc.data();
+		console.log('✅ Backend: PayPal data found:', data);
+
+		res.json({
+			success: true,
+			paypalEmail: data.paypalEmail || null,
+			payouts: data.payouts || [],
+			walletAddress: data.walletAddress,
+			createdAt: data.createdAt,
+			updatedAt: data.updatedAt
+		});
+
+	} catch (error) {
+		console.error('❌ Backend: Error fetching PayPal data:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { amount: requestedAmount } = req.body;
+
+		console.log('🔧 Processing payout request for wallet:', walletAddress);
+		console.log('💰 Requested amount from user:', requestedAmount);
+
+		// Get and validate PayPal data
+		const paypalRef = db.collection('paypal').doc(walletAddress.toLowerCase());
+		const paypalDoc = await paypalRef.get();
+
+		if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
+			return res.status(400).json({ error: 'PayPal email not configured' });
+		}
+
+		const paypalData = paypalDoc.data();
+
+		// Security validations
+		if (!paypalData.identityDocument || !paypalData.identityDocument.verified) {
+			return res.status(400).json({
+				error: 'Identity verification required before withdrawals'
+			});
+		}
+
+		if (!paypalData.taxIdDocument || !paypalData.taxIdDocument.verified) {
+			return res.status(400).json({
+				error: 'Tax ID verification required before withdrawals'
+			});
+		}
+
+		// Check for pending payouts
+		const existingPayouts = paypalData.payouts || [];
+		const pendingPayouts = existingPayouts.filter(payout =>
+			payout.status === 'pending' ||
+			payout.status === 'processing' ||
+			payout.paypalStatus === 'PENDING'
+		);
+
+		if (pendingPayouts.length > 0) {
+			return res.status(400).json({
+				error: 'You have a pending payout. Please wait for it to complete.'
+			});
+		}
+
+		// Get user data and calculate available payout
+		const userSnapshot = await db.collection('users')
+			.where('walletAddress', '==', walletAddress)
+			.get();
+
+		if (userSnapshot.empty) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = userSnapshot.docs[0].data();
+
+		// Calculate available payout using the backend function
+		const payoutCalculation = await calculateUserPayout(userData);
+
+		if (payoutCalculation.error) {
+			return res.status(400).json({ error: payoutCalculation.error });
+		}
+
+		const availableAmount = Number(payoutCalculation.availableAmount) || 0;
+		const withdrawAmount = requestedAmount ? parseFloat(requestedAmount) : availableAmount;
+
+		console.log('📊 Available amount:', availableAmount.toFixed(2));
+		console.log('💵 Withdrawal amount:', withdrawAmount.toFixed(2));
+
+		// Validate withdrawal amount
+		if (!withdrawAmount || withdrawAmount < 1.00) {
+			return res.status(400).json({
+				error: `Minimum payout amount is $1.00. You requested: $${withdrawAmount?.toFixed(2) || '0.00'}`
+			});
+		}
+
+		if (withdrawAmount > availableAmount) {
+			return res.status(400).json({
+				error: `Requested amount exceeds available balance. Requested: $${withdrawAmount.toFixed(2)}, Available: $${availableAmount.toFixed(2)}`
+			});
+		}
+
+		// Check the remaining balance rule
+		const remainingAfterWithdrawal = availableAmount - withdrawAmount;
+		if (remainingAfterWithdrawal > 0 && remainingAfterWithdrawal < 1.00) {
+			return res.status(400).json({
+				error: `Withdrawal would leave $${remainingAfterWithdrawal.toFixed(2)}. Please withdraw the full amount or leave at least $1.00`
+			});
+		}
+
+		// Check if disbursement pool has enough funds
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+		if (!limitsDoc.exists) {
+			return res.status(400).json({
+				error: 'Disbursement system not configured'
+			});
+		}
+
+		const limitsData = limitsDoc.data();
+		const remainingInPool = Math.max(0, (limitsData.totalLimit || 0) - (limitsData.usedAmount || 0));
+
+		if (withdrawAmount > remainingInPool) {
+			return res.status(400).json({
+				error: `Insufficient funds in disbursement pool. Available in pool: $${remainingInPool.toFixed(2)}`
+			});
+		}
+
+		// Get current disbursement ID for tracking
+		const currentDisbursementId = limitsData.disbursementId || `disbursement_${Date.now()}`;
+
+		// Create PayPal payout
+		console.log('Processing PayPal payout...');
+		console.log('Amount to withdraw:', withdrawAmount.toFixed(2));
+
+		const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+		payoutRequest.requestBody({
+			sender_batch_header: {
+				sender_batch_id: payoutId,
+				email_subject: "Withdrawal from Hope KK NFTs",
+				email_message: "You have received a withdrawal from your Hope KK NFT share."
+			},
+			items: [{
+				recipient_type: "EMAIL",
+				amount: {
+					value: withdrawAmount.toFixed(2),
+					currency: "USD"
+				},
+				receiver: paypalData.paypalEmail,
+				note: `Hope KK NFT Share - ${userData.totalMinted} NFTs out of ${payoutCalculation.totalSupply} total`,
+				sender_item_id: payoutId
+			}]
+		});
+
+		const response = await paypalClient.execute(payoutRequest);
+
+		// Update disbursement pool usage
+		const newUsedAmount = (limitsData.usedAmount || 0) + withdrawAmount;
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: newUsedAmount,
+			lastUpdated: new Date().toISOString(),
+			// Ensure disbursementId exists for tracking
+			...((!limitsData.disbursementId) && { disbursementId: currentDisbursementId })
+		});
+
+		// Record the payout with disbursement tracking
+		const payoutData = {
+			id: payoutId,
+			amount: withdrawAmount,
+			status: 'pending',
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			paypalStatus: response.result.batch_header.batch_status,
+			requestedAt: new Date().toISOString(),
+			processedAt: new Date().toISOString(),
+			paypalEmail: paypalData.paypalEmail,
+			walletAddress: walletAddress,
+			userNFTs: userData.totalMinted,
+			totalSupply: payoutCalculation.totalSupply,
+			sharePercentage: payoutCalculation.sharePercentage,
+			disbursementAmount: payoutCalculation.disbursementAmount,
+			availableAtTimeOfWithdrawal: availableAmount,
+			amountWithdrawn: withdrawAmount,
+			disbursementId: currentDisbursementId // Add disbursement tracking
+		};
+
+		await paypalRef.update({
+			payouts: [...existingPayouts, payoutData],
+			lastPayoutAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		});
+
+		console.log('✅ Payout submitted - Status:', response.result.batch_header.batch_status);
+		console.log('💸 Amount requested:', withdrawAmount.toFixed(2));
+		console.log('💰 Remaining available:', remainingAfterWithdrawal.toFixed(2));
+
+		res.json({
+			success: false, // Always false initially
+			message: `Withdrawal request of $${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
+			payoutId: payoutId,
+			amount: withdrawAmount,
+			remainingBalance: remainingAfterWithdrawal,
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			sharePercentage: payoutCalculation.sharePercentage,
+			estimatedArrival: '1-3 business days',
+			status: 'pending',
+			paypalStatus: response.result.batch_header.batch_status,
+			disbursementId: currentDisbursementId,
+			note: 'Your withdrawal is being processed. Check back later for status updates.'
+		});
+
+	} catch (error) {
+		console.error('❌ Payout failed:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Withdrawal failed. Please try again.',
+			details: error.message
+		});
+	}
+});
+
+// Get current payout limits
+app.get('/api/admin/payout-limits', cors(corsOptions), async (req, res) => {
+	try {
+		const { adminKey } = req.query;
+
+		if (adminKey !== process.env.ADMIN_KEY) {
+			return res.status(401).json({ error: 'Unauthorized' });
+		}
+
+		const limitsDoc = await db.collection('admin').doc('payoutLimits').get();
+		if (!limitsDoc.exists) {
+			return res.json({
+				totalLimit: 0,
+				remainingLimit: 0,
+				isSet: false
+			});
+		}
+
+		res.json({
+			...limitsDoc.data(),
+			isSet: true
+		});
+
+	} catch (error) {
+		console.error('Error getting payout limits:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Add this endpoint to manually check and update payout statuses
+// Replace your existing /api/admin/refresh-payout-status/:walletAddress endpoint with this fixed version:
+
+app.post('/api/admin/refresh-payout-status/:walletAddress', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+
+		// Get PayPal data for this wallet
+		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+		if (!paypalDoc.exists) {
+			return res.status(404).json({ error: 'PayPal data not found' });
+		}
+
+		const paypalData = paypalDoc.data();
+		const payouts = paypalData.payouts || [];
+
+		// Find pending payouts with PayPal batch IDs
+		const pendingPayouts = payouts.filter(payout =>
+			(payout.status === 'pending' || payout.status === 'processing') &&
+			payout.paypalBatchId
+		);
+
+		if (pendingPayouts.length === 0) {
+			return res.json({
+				success: true,
+				message: 'No pending payouts to check',
+				checkedPayouts: 0,
+				updatedPayouts: 0
+			});
+		}
+
+		let updatedCount = 0;
+
+		// Check each pending payout with PayPal
+		for (const payout of pendingPayouts) {
+			try {
+				console.log(`Checking PayPal status for batch: ${payout.paypalBatchId}`);
+
+				const request = new payoutsSDK.payouts.PayoutsGetRequest(payout.paypalBatchId);
+				const response = await paypalClient.execute(request);
+
+				const batchStatus = response.result.batch_header.batch_status;
+				const payoutItem = response.result.items[0]; // First item
+
+				console.log(`Batch ${payout.paypalBatchId} status: ${batchStatus}`);
+
+				// Update the payout object - ONLY set defined values
+				payout.paypalStatus = batchStatus;
+				payout.lastChecked = new Date().toISOString();
+
+				if (payoutItem) {
+					// Only set values that exist
+					if (payoutItem.transaction_status) {
+						payout.itemStatus = payoutItem.transaction_status;
+					}
+
+					if (payoutItem.transaction_id) {
+						payout.paypalTransactionId = payoutItem.transaction_id;
+					}
+
+					// Update our local status based on PayPal status
+					if (payoutItem.transaction_status === 'SUCCESS') {
+						payout.status = 'completed';
+						payout.completedAt = new Date().toISOString();
+						updatedCount++;
+					} else if (
+						payoutItem.transaction_status === 'FAILED' ||
+						payoutItem.transaction_status === 'RETURNED' ||
+						batchStatus === 'DENIED'
+					) {
+						payout.status = 'failed';
+
+						// Handle error messages safely
+						if (payoutItem.errors && payoutItem.errors.length > 0) {
+							payout.failureReason = payoutItem.errors[0].message;
+						} else if (batchStatus === 'DENIED') {
+							payout.failureReason = 'Payout batch was denied by PayPal';
+						} else {
+							payout.failureReason = 'Transaction failed';
+						}
+
+						updatedCount++;
+					}
+				} else {
+					// Handle case where there are no items in the response
+					if (batchStatus === 'DENIED') {
+						payout.status = 'failed';
+						payout.failureReason = 'Payout batch was denied by PayPal';
+						updatedCount++;
+					}
+				}
+
+			} catch (error) {
+				console.error(`Error checking payout ${payout.id}:`, error);
+				payout.lastCheckError = error.message;
+				payout.lastChecked = new Date().toISOString();
+			}
+		}
+
+		// Save updated payouts back to database
+		await db.collection('paypal').doc(walletAddress.toLowerCase()).update({
+			payouts: payouts,
+			lastStatusCheck: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		});
+
+		res.json({
+			success: true,
+			message: `Checked ${pendingPayouts.length} pending payouts, updated ${updatedCount}`,
+			checkedPayouts: pendingPayouts.length,
+			updatedPayouts: updatedCount
+		});
+
+	} catch (error) {
+		console.error('Error refreshing payout status:', error);
+		res.status(500).json({
+			error: 'Failed to refresh payout status',
+			details: error.message
+		});
+	}
+});
+
+// Process payout request
+app.post('/api/users/:email/request-payout', cors(corsOptions), async (req, res) => {
+	try {
+		const email = req.params.email;
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+		// Get user data
+		const userDoc = await db.collection('users').doc(docId).get();
+		if (!userDoc.exists) {
+			return res.status(404).json({ error: 'User not found' });
+		}
+
+		const userData = userDoc.data();
+
+		// Check if user has PayPal email
+		if (!userData.paypalEmail) {
+			return res.status(400).json({
+				error: 'PayPal email is required. Please add your PayPal email first.'
+			});
+		}
+
+		// Calculate payout eligibility
+		const payoutInfo = await calculateUserPayout(userData);
+
+		// Check if user has enough for payout
+		if (payoutInfo.availablePayout < payoutInfo.minimumPayout) {
+			return res.status(400).json({
+				error: `Minimum payout amount is $${payoutInfo.minimumPayout}. You have $${payoutInfo.availablePayout.toFixed(2)} available.`
+			});
+		}
+
+		// Check for pending payouts
+		const pendingPayouts = await db.collection('payouts')
+			.where('userEmail', '==', email)
+			.where('status', '==', 'pending')
+			.get();
+
+		if (!pendingPayouts.empty) {
+			return res.status(400).json({
+				error: 'You have a pending payout request. Please wait for it to complete.'
+			});
+		}
+
+		// Create payout record
+		const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+		const payoutData = {
+			id: payoutId,
+			userEmail: email,
+			userName: userData.name,
+			paypalEmail: userData.paypalEmail,
+			amount: payoutInfo.availablePayout,
+			currency: 'USD',
+			status: 'pending',
+			createdAt: new Date().toISOString(),
+			nftCount: userData.totalMinted || 0,
+			sharePercentage: payoutInfo.sharePercentage
+		};
+
+		// Store payout request
+		await db.collection('payouts').doc(payoutId).set(payoutData);
+
+		// Create PayPal payout
+		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+		payoutRequest.requestBody({
+			sender_batch_header: {
+				sender_batch_id: payoutId,
+				email_subject: "You have a payout from Hope KK NFTs!",
+				email_message: "You have received a payout from your Hope KK NFT royalties. Thank you for being part of our community!"
+			},
+			items: [
+				{
+					recipient_type: "EMAIL",
+					amount: {
+						value: payoutInfo.availablePayout.toFixed(2),
+						currency: "USD"
+					},
+					receiver: userData.paypalEmail,
+					note: `Hope KK NFT Royalty Payout - ${userData.totalMinted} NFTs owned`,
+					sender_item_id: payoutId
+				}
+			]
+		});
+
+		// Execute PayPal payout
+		const response = await paypalClient.execute(payoutRequest);
+
+		// Update payout record with PayPal details
+		await db.collection('payouts').doc(payoutId).update({
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			paypalStatus: response.result.batch_header.batch_status,
+			paypalResponse: response.result,
+			updatedAt: new Date().toISOString()
+		});
+
+		// Send confirmation email
+		try {
+			await sendPayoutConfirmationEmail(userData.email, userData.name, payoutInfo.availablePayout);
+		} catch (emailError) {
+			console.error('Failed to send payout confirmation email:', emailError);
+		}
+
+		res.json({
+			success: true,
+			message: 'Payout request submitted successfully!',
+			payoutId: payoutId,
+			amount: payoutInfo.availablePayout,
+			paypalBatchId: response.result.batch_header.payout_batch_id
+		});
+
+	} catch (error) {
+		console.error('Error processing payout:', error);
+
+		// Update payout status to failed if it was created
+		if (error.payoutId) {
+			await db.collection('payouts').doc(error.payoutId).update({
+				status: 'failed',
+				errorMessage: error.message,
+				updatedAt: new Date().toISOString()
+			});
+		}
+
+		res.status(500).json({
+			error: 'Failed to process payout request',
+			details: error.message
+		});
+	}
+});
+
+
+// Add this function to run every hour
+const checkPendingPayouts = async () => {
+	try {
+		console.log('🔄 Checking pending payouts...');
+
+		// Get all PayPal documents with pending payouts
+		const paypalSnapshot = await db.collection('paypal').get();
+
+		for (const doc of paypalSnapshot.docs) {
+			const data = doc.data();
+			const payouts = data.payouts || [];
+
+			const pendingPayouts = payouts.filter(payout =>
+				(payout.status === 'pending' || payout.status === 'processing') &&
+				payout.paypalBatchId
+			);
+
+			if (pendingPayouts.length === 0) continue;
+
+			let hasUpdates = false;
+
+			for (const payout of pendingPayouts) {
+				try {
+					const request = new payoutsSDK.payouts.PayoutsGetRequest(payout.paypalBatchId);
+					const response = await paypalClient.execute(request);
+
+					const payoutItem = response.result.items[0];
+
+					if (payoutItem && payoutItem.transaction_status === 'SUCCESS') {
+						payout.status = 'completed';
+						payout.completedAt = new Date().toISOString();
+						payout.paypalTransactionId = payoutItem.transaction_id;
+						hasUpdates = true;
+
+						console.log(`✅ Payout ${payout.id} completed`);
+					} else if (payoutItem && (payoutItem.transaction_status === 'FAILED' || payoutItem.transaction_status === 'RETURNED')) {
+						payout.status = 'failed';
+						payout.failureReason = payoutItem.errors ? payoutItem.errors[0].message : 'Transaction failed';
+						hasUpdates = true;
+
+						console.log(`❌ Payout ${payout.id} failed`);
+					}
+
+				} catch (error) {
+					console.error(`Error checking payout ${payout.id}:`, error);
+				}
+			}
+
+			if (hasUpdates) {
+				await doc.ref.update({
+					payouts: payouts,
+					lastAutoCheck: new Date().toISOString(),
+					updatedAt: new Date().toISOString()
+				});
+			}
+		}
+
+	} catch (error) {
+		console.error('Error in automatic payout check:', error);
+	}
+};
+
+// Run every hour (add this to your server startup)
+setInterval(checkPendingPayouts, 60 * 60 * 1000); // Every hour
+
+// Upload identity document endpoint
+// Replace the identity upload endpoint with this improved version:
+
+app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { documentType, frontImage, backImage } = req.body;
+
+		console.log('🔧 Identity document upload for wallet:', walletAddress);
+		console.log('Document type:', documentType);
+
+		if (!documentType || !frontImage) {
+			return res.status(400).json({ error: 'Document type and front image are required' });
+		}
+
+		// Validate document type
+		const validTypes = ['passport', 'drivers_license', 'national_id'];
+		if (!validTypes.includes(documentType)) {
+			return res.status(400).json({ error: 'Invalid document type' });
+		}
+
+		// Upload front image
+		const frontBase64Data = frontImage.replace(/^data:image\/[a-z]+;base64,/, '');
+		const frontImageBuffer = Buffer.from(frontBase64Data, 'base64');
+
+		let frontIpfsData = null;
+		try {
+			frontIpfsData = await uploadToIPFSFromBuffer(frontImageBuffer, `identity_front_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
+			console.log('Front document uploaded to IPFS:', frontIpfsData.ipfsUrl);
+		} catch (ipfsError) {
+			console.error('Front image IPFS upload failed:', ipfsError);
+			return res.status(500).json({ error: 'Failed to upload front document to IPFS' });
+		}
+
+		// Upload back image if provided
+		let backIpfsData = null;
+		if (backImage) {
+			try {
+				const backBase64Data = backImage.replace(/^data:image\/[a-z]+;base64,/, '');
+				const backImageBuffer = Buffer.from(backBase64Data, 'base64');
+				backIpfsData = await uploadToIPFSFromBuffer(backImageBuffer, `identity_back_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
+				console.log('Back document uploaded to IPFS:', backIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('Back image IPFS upload failed:', ipfsError);
+				// Continue without back image if upload fails
+			}
+		}
+
+		// Update PayPal collection with identity document
+		const docId = walletAddress.toLowerCase();
+		const paypalRef = db.collection('paypal').doc(docId);
+
+		const doc = await paypalRef.get();
+		const updateData = {
+			identityDocument: {
+				documentType: documentType,
+				frontImage: {
+					ipfsUrl: frontIpfsData.ipfsUrl,
+					ipfsHash: frontIpfsData.ipfsHash
+				},
+				...(backIpfsData && {
+					backImage: {
+						ipfsUrl: backIpfsData.ipfsUrl,
+						ipfsHash: backIpfsData.ipfsHash
+					}
+				}),
+				uploadedAt: new Date().toISOString(),
+				verified: false
+			},
+			updatedAt: new Date().toISOString()
+		};
+
+		if (doc.exists) {
+			await paypalRef.update(updateData);
+		} else {
+			await paypalRef.set({
+				walletAddress: walletAddress.toLowerCase(),
+				...updateData,
+				createdAt: new Date().toISOString(),
+				payouts: []
+			});
+		}
+
+		res.json({
+			success: true,
+			message: 'Identity document uploaded successfully',
+			documentType: documentType,
+			frontImageUrl: frontIpfsData.ipfsUrl,
+			backImageUrl: backIpfsData?.ipfsUrl || null
+		});
+
+	} catch (error) {
+		console.error('❌ Error uploading identity document:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Tax ID document upload endpoint
+app.post('/api/paypal/:walletAddress/upload-tax-id', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const { taxIdType, documentImage } = req.body;
+
+		console.log('🔧 Tax ID document upload for wallet:', walletAddress);
+		console.log('Tax ID type:', taxIdType);
+
+		if (!taxIdType || !documentImage) {
+			return res.status(400).json({ error: 'Tax ID type and document image are required' });
+		}
+
+		// Validate tax ID type
+		const validTaxIdTypes = ['ssn_card', 'tax_return', 'ein_letter', 'itin_letter', 'other'];
+		if (!validTaxIdTypes.includes(taxIdType)) {
+			return res.status(400).json({ error: 'Invalid tax ID document type' });
+		}
+
+		// Convert base64 to buffer
+		const base64Data = documentImage.replace(/^data:image\/[a-z]+;base64,/, '');
+		const imageBuffer = Buffer.from(base64Data, 'base64');
+
+		// Upload to IPFS
+		let ipfsData = null;
+		try {
+			ipfsData = await uploadToIPFSFromBuffer(imageBuffer, `tax_id_${walletAddress.toLowerCase()}_${Date.now()}.jpg`);
+			console.log('Tax ID document uploaded to IPFS:', ipfsData.ipfsUrl);
+		} catch (ipfsError) {
+			console.error('Tax ID IPFS upload failed:', ipfsError);
+			return res.status(500).json({ error: 'Failed to upload tax ID document to IPFS' });
+		}
+
+		// Update PayPal collection with tax ID document
+		const docId = walletAddress.toLowerCase();
+		const paypalRef = db.collection('paypal').doc(docId);
+
+		const doc = await paypalRef.get();
+		const updateData = {
+			taxIdDocument: {
+				taxIdType: taxIdType,
+				ipfsUrl: ipfsData.ipfsUrl,
+				ipfsHash: ipfsData.ipfsHash,
+				uploadedAt: new Date().toISOString(),
+				verified: false
+			},
+			updatedAt: new Date().toISOString()
+		};
+
+		if (doc.exists) {
+			await paypalRef.update(updateData);
+		} else {
+			await paypalRef.set({
+				walletAddress: walletAddress.toLowerCase(),
+				...updateData,
+				createdAt: new Date().toISOString(),
+				payouts: []
+			});
+		}
+
+		res.json({
+			success: true,
+			message: 'Tax ID document uploaded successfully',
+			taxIdType: taxIdType,
+			documentUrl: ipfsData.ipfsUrl
+		});
+
+	} catch (error) {
+		console.error('❌ Error uploading tax ID document:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Get tax ID document status
+app.get('/api/paypal/:walletAddress/tax-id-status', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+
+		if (!paypalDoc.exists) {
+			return res.json({
+				hasDocument: false,
+				taxIdType: null,
+				verified: false,
+				canUpload: true
+			});
+		}
+
+		const data = paypalDoc.data();
+		const taxIdDoc = data.taxIdDocument;
+
+		if (!taxIdDoc) {
+			return res.json({
+				hasDocument: false,
+				taxIdType: null,
+				verified: false,
+				canUpload: true
+			});
+		}
+
+		res.json({
+			hasDocument: true,
+			taxIdType: taxIdDoc.taxIdType,
+			verified: taxIdDoc.verified || false,
+			uploadedAt: taxIdDoc.uploadedAt,
+			rejectionReason: taxIdDoc.rejectionReason || null,
+			rejectedAt: taxIdDoc.rejectedAt || null,
+			verifiedAt: taxIdDoc.verifiedAt || null,
+			canUpload: !taxIdDoc.verified
+		});
+
+	} catch (error) {
+		console.error('❌ Error checking tax ID status:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+const retryRequest = async (fn, maxRetries = 3, baseDelay = 2000) => {
+	for (let i = 0; i < maxRetries; i++) {
+		try {
+			return await fn();
+		} catch (error) {
+			if (i === maxRetries - 1) {
+				console.error(`❌ All ${maxRetries} upload attempts failed`);
+				throw error;
+			}
+
+			const delay = baseDelay * Math.pow(2, i); // Exponential backoff
+			console.log(`⏳ Upload attempt ${i + 1} failed, retrying in ${delay}ms...`);
+			await new Promise(resolve => setTimeout(resolve, delay));
+		}
+	}
+};
+
+const uploadToIPFSFromBuffer = async (buffer, fileName) => {
+	try {
+		// Validate buffer size (10MB max)
+		if (buffer.length > 10 * 1024 * 1024) {
+			throw new Error('Image size exceeds 10MB limit');
+		}
+
+		const formData = new FormData();
+		formData.append('file', buffer, fileName);
+
+		const config = {
+			method: 'post',
+			url: 'https://api.pinata.cloud/pinning/pinFileToIPFS',
+			data: formData,
+			headers: {
+				'Authorization': `Bearer ${process.env.PINATA_JWT}`,
+				...formData.getHeaders()
+			},
+			timeout: 60000, // Increased to 60 seconds for large images
+			maxContentLength: 15 * 1024 * 1024, // 15MB
+			maxBodyLength: 15 * 1024 * 1024,
+			// Add axios retry configuration
+			'axios-retry': {
+				retries: 3,
+				retryDelay: (retryCount) => {
+					return retryCount * 2000; // 2s, 4s, 6s delays
+				}
+			}
+		};
+
+		console.log(`📤 Uploading ${(buffer.length / 1024 / 1024).toFixed(2)}MB to IPFS...`);
+
+		const response = await axios(config);
+
+		console.log('✅ IPFS upload successful:', response.data.IpfsHash);
+
+		return {
+			ipfsHash: response.data.IpfsHash,
+			ipfsUrl: `https://gateway.pinata.cloud/ipfs/${response.data.IpfsHash}`
+		};
+	} catch (error) {
+		console.error('❌ IPFS upload error:', error.message);
+
+		if (error.code === 'ECONNABORTED') {
+			throw new Error('IPFS upload timeout. Please try with a smaller image.');
+		}
+
+		if (error.response) {
+			// Pinata API error
+			throw new Error(`IPFS upload failed: ${error.response.data?.error || error.message}`);
+		}
+
+		throw new Error(`IPFS upload failed: ${error.message}`);
+	}
+};
+
+// Get identity document status
+// Get identity document status - UPDATED VERSION
+app.get('/api/paypal/:walletAddress/identity-status', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const paypalDoc = await db.collection('paypal').doc(walletAddress.toLowerCase()).get();
+
+		if (!paypalDoc.exists) {
+			return res.json({
+				hasDocument: false,
+				documentType: null,
+				verified: false,
+				canUpload: true
+			});
+		}
+
+		const data = paypalDoc.data();
+		const identityDoc = data.identityDocument;
+
+		if (!identityDoc) {
+			return res.json({
+				hasDocument: false,
+				documentType: null,
+				verified: false,
+				canUpload: true
+			});
+		}
+
+		// User can upload if:
+		// 1. No document exists, OR
+		// 2. Document was rejected, OR  
+		// 3. Document is still pending (not verified and no rejection reason)
+		const canUpload = !identityDoc ||
+			(identityDoc.rejectionReason) ||
+			(!identityDoc.verified && !identityDoc.rejectionReason);
+
+		res.json({
+			hasDocument: true,
+			documentType: identityDoc.documentType,
+			verified: identityDoc.verified || false,
+			uploadedAt: identityDoc.uploadedAt,
+			rejectionReason: identityDoc.rejectionReason || null,
+			rejectedAt: identityDoc.rejectedAt || null,
+			verifiedAt: identityDoc.verifiedAt || null,
+			canUpload: !identityDoc.verified,
+			frontImageUrl: identityDoc.frontImage?.ipfsUrl || identityDoc.ipfsUrl, // Backward compatibility
+			backImageUrl: identityDoc.backImage?.ipfsUrl || null,
+			hasBothSides: !!(identityDoc.frontImage && identityDoc.backImage)
+		});
+
+	} catch (error) {
+		console.error('❌ Error checking identity status:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// ADD this endpoint to your server.js to check the status of your payout
+
+app.get('/api/check-batch-status/:batchId', cors(corsOptions), async (req, res) => {
+	try {
+		const { batchId } = req.params;
+
+		console.log(`Checking status for batch: ${batchId}`);
+
+		const request = new payoutsSDK.payouts.PayoutsGetRequest(batchId);
+		const response = await paypalClient.execute(request);
+
+		console.log('Batch Status:', response.result.batch_header.batch_status);
+		console.log('Items:', response.result.items);
+
+		res.json({
+			success: true,
+			batchId: batchId,
+			batchStatus: response.result.batch_header.batch_status,
+			totalAmount: response.result.batch_header.amount.value,
+			currency: response.result.batch_header.amount.currency,
+			items: response.result.items.map(item => ({
+				transactionId: item.transaction_id || 'N/A',
+				status: item.transaction_status || 'PENDING',
+				recipient: item.payout_item.receiver,
+				amount: item.payout_item.amount.value,
+				note: item.payout_item.note,
+				timeProcessed: item.time_processed || 'Not processed yet'
+			}))
+		});
+
+	} catch (error) {
+		console.error('Error checking batch status:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to check batch status',
+			details: error.message
+		});
+	}
+});
+
+// Test this by visiting:
+// http://localhost:5000/api/check-batch-status/4EA8FJP6CXNYA
+
+// Admin endpoint to check payout status and update
+app.post('/api/admin/update-payout-status/:payoutId', cors(corsOptions), async (req, res) => {
+	try {
+		const { payoutId } = req.params;
+
+		// Get payout record
+		const payoutDoc = await db.collection('payouts').doc(payoutId).get();
+		if (!payoutDoc.exists) {
+			return res.status(404).json({ error: 'Payout not found' });
+		}
+
+		const payoutData = payoutDoc.data();
+
+		if (!payoutData.paypalBatchId) {
+			return res.status(400).json({ error: 'No PayPal batch ID found' });
+		}
+
+		// Check status with PayPal
+		const request = new payoutsSDK.payouts.PayoutsGetRequest(payoutData.paypalBatchId);
+		const response = await paypalClient.execute(request);
+
+		const batchStatus = response.result.batch_header.batch_status;
+		const payoutItem = response.result.items[0]; // Assuming single item payout
+
+		// Update local record
+		const updateData = {
+			paypalStatus: batchStatus,
+			updatedAt: new Date().toISOString()
+		};
+
+		if (payoutItem) {
+			updateData.itemStatus = payoutItem.transaction_status;
+			updateData.paypalTransactionId = payoutItem.transaction_id;
+
+			// Update our local status based on PayPal status
+			if (payoutItem.transaction_status === 'SUCCESS') {
+				updateData.status = 'completed';
+				updateData.completedAt = new Date().toISOString();
+			} else if (payoutItem.transaction_status === 'FAILED' || payoutItem.transaction_status === 'RETURNED') {
+				updateData.status = 'failed';
+				updateData.failureReason = payoutItem.errors ? payoutItem.errors[0].message : 'Unknown error';
+			}
+		}
+
+		await db.collection('payouts').doc(payoutId).update(updateData);
+
+		res.json({
+			success: true,
+			status: updateData.status || 'pending',
+			paypalStatus: batchStatus,
+			details: response.result
+		});
+
+	} catch (error) {
+		console.error('Error updating payout status:', error);
+		res.status(500).json({ error: 'Failed to update payout status' });
+	}
+});
+
+// Email template for payout confirmation
+const sendPayoutConfirmationEmail = async (userEmail, userName, amount) => {
+	try {
+		const mailOptions = {
+			from: `"MuseCoinX - Hope KK NFTs" <${process.env.EMAIL_USER}>`,
+			to: userEmail,
+			subject: '🎉 Your Hope KK NFT Payout is Processing!',
+			html: `
+		<!DOCTYPE html>
+		<html>
+		<head>
+		  <style>
+			body {
+			  font-family: 'Arial', sans-serif;
+			  line-height: 1.6;
+			  color: #333;
+			  max-width: 600px;
+			  margin: 0 auto;
+			  padding: 20px;
+			  background-color: #f4f4f4;
+			}
+			.email-container {
+			  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+			  border-radius: 15px;
+			  padding: 30px;
+			  box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+			}
+			.header {
+			  text-align: center;
+			  color: white;
+			  margin-bottom: 30px;
+			}
+			.content {
+			  background: white;
+			  padding: 30px;
+			  border-radius: 10px;
+			  margin: 20px 0;
+			  box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+			}
+			.payout-info {
+			  background: #f8f9fa;
+			  padding: 20px;
+			  border-radius: 8px;
+			  margin: 20px 0;
+			  border-left: 4px solid #28a745;
+			}
+			.amount {
+			  font-size: 2rem;
+			  font-weight: bold;
+			  color: #28a745;
+			  text-align: center;
+			  margin: 20px 0;
+			}
+		  </style>
+		</head>
+		<body>
+		  <div class="email-container">
+			<div class="header">
+			  <h1>💰 Payout Processing</h1>
+			</div>
+			
+			<div class="content">
+			  <h2>Hello ${userName}! 👋</h2>
+			  
+			  <p>Great news! Your Hope KK NFT royalty payout is now being processed.</p>
+			  
+			  <div class="amount">$${amount.toFixed(2)} USD</div>
+			  
+			  <div class="payout-info">
+				<h3>📋 Payout Details:</h3>
+				<p><strong>Amount:</strong> $${amount.toFixed(2)} USD</p>
+				<p><strong>Status:</strong> Processing</p>
+				<p><strong>Estimated Arrival:</strong> 1-3 business days</p>
+			  </div>
+			  
+			  <p>Your payout will be sent to your registered PayPal email address. You'll receive a separate notification from PayPal once the funds are available.</p>
+			  
+			  <p>Thank you for being part of the Hope KK NFT community!</p>
+			</div>
+		  </div>
+		</body>
+		</html>
+	  `
+		};
+
+		const result = await emailTransporter.sendMail(mailOptions);
+		console.log('Payout confirmation email sent:', result.messageId);
+		return { success: true, messageId: result.messageId };
+	} catch (error) {
+		console.error('Error sending payout confirmation email:', error);
+		return { success: false, error: error.message };
+	}
+};
+
+// ============================================
+// ADMIN ENDPOINTS FOR PAYOUT MANAGEMENT
+// ============================================
+
+// Set total payout pool (admin only)
+app.post('/api/admin/set-payout-pool', cors(corsOptions), async (req, res) => {
+	try {
+		const { totalAmount, adminKey } = req.body;
+
+		// Simple admin authentication - replace with proper auth
+		if (adminKey !== process.env.ADMIN_KEY) {
+			return res.status(401).json({ error: 'Unauthorized' });
+		}
+
+		await db.collection('admin').doc('payoutPool').set({
+			totalAmount: parseFloat(totalAmount),
+			updatedAt: new Date().toISOString(),
+			updatedBy: 'admin'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout pool updated successfully',
+			totalAmount: parseFloat(totalAmount)
+		});
+
+	} catch (error) {
+		console.error('Error updating payout pool:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// Get all payouts (admin only)
+app.get('/api/admin/payouts', cors(corsOptions), async (req, res) => {
+	try {
+		const { adminKey } = req.query;
+
+		if (adminKey !== process.env.ADMIN_KEY) {
+			return res.status(401).json({ error: 'Unauthorized' });
+		}
+
+		const payoutsSnapshot = await db.collection('payouts')
+			.orderBy('createdAt', 'desc')
+			.get();
+
+		const payouts = [];
+		payoutsSnapshot.forEach(doc => {
+			payouts.push({ id: doc.id, ...doc.data() });
+		});
+
+		res.json({
+			success: true,
+			payouts: payouts
+		});
+
+	} catch (error) {
+		console.error('Error fetching admin payouts:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+app.get('/api/test-paypal-connection', cors(corsOptions), async (req, res) => {
+	try {
+		// Create a simple test request to verify connection
+		const request = new paypal.orders.OrdersCreateRequest();
+		request.prefer("return=representation");
+		request.requestBody({
+			intent: 'CAPTURE',
+			purchase_units: [{
+				amount: {
+					currency_code: 'USD',
+					value: '1.00'
+				}
+			}]
+		});
+
+		const response = await paypalClient.execute(request);
+		console.log('✅ PayPal connection successful!');
+		console.log('Order ID:', response.result.id);
+
+		res.json({
+			success: true,
+			environment: process.env.NODE_ENV === 'production' ? 'Live' : 'Sandbox',
+			message: 'PayPal connection successful',
+			orderId: response.result.id
+		});
+	} catch (error) {
+		console.error('❌ PayPal connection failed:', error);
+		res.status(500).json({
+			success: false,
+			environment: process.env.NODE_ENV === 'production' ? 'Live' : 'Sandbox',
+			message: 'PayPal connection failed',
+			error: error.message
+		});
+	}
+});
+
+// Add this endpoint after the existing identity verification endpoint
+app.put('/api/admin/paypal/:walletAddress/verify-tax-id', cors(corsOptions), async (req, res) => {
+	try {
+		const { walletAddress } = req.params;
+		const { verified, rejectionReason } = req.body;
+
+		console.log(`🔍 Verifying tax ID document for wallet: ${walletAddress}`, { verified, rejectionReason });
+
+		// Find the document in the paypal collection
+		const paypalSnapshot = await db.collection('paypal')
+			.where('walletAddress', '==', walletAddress)
+			.limit(1)
+			.get();
+
+		if (paypalSnapshot.empty) {
+			return res.status(404).json({
+				error: 'Tax ID document not found for this wallet address'
+			});
+		}
+
+		const docRef = paypalSnapshot.docs[0].ref;
+		const updateData = {
+			'taxIdDocument.verified': verified,
+			'taxIdDocument.verifiedAt': verified ? new Date().toISOString() : null,
+			'taxIdDocument.rejectionReason': verified ? null : rejectionReason,
+			'taxIdDocument.rejectedAt': verified ? null : new Date().toISOString(),
+			'updatedAt': new Date().toISOString()
+		};
+
+		await docRef.update(updateData);
+
+		console.log(`✅ Tax ID document ${verified ? 'approved' : 'rejected'} for wallet: ${walletAddress}`);
+
+		res.json({
+			success: true,
+			message: verified ? 'Tax ID document approved successfully' : 'Tax ID document rejected successfully',
+			verified: verified,
+			rejectionReason: rejectionReason || null
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating tax ID verification status:', error);
+		res.status(500).json({
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Test PayPal payout endpoint  
+app.post('/api/test-paypal-payout', cors(corsOptions), async (req, res) => {
+	try {
+		const { recipientEmail, amount } = req.body;
+
+		if (!recipientEmail || !amount) {
+			return res.status(400).json({
+				error: 'Recipient email and amount are required'
+			});
+		}
+
+		// Validate amount
+		const payoutAmount = parseFloat(amount);
+		if (payoutAmount < 1.00 || payoutAmount > 10000) {
+			return res.status(400).json({
+				error: 'Amount must be between $1.00 and $10,000.00'
+			});
+		}
+
+		// Create payout request using your existing payoutsSDK
+		const payoutId = `test_payout_${Date.now()}`;
+		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+
+		payoutRequest.requestBody({
+			sender_batch_header: {
+				sender_batch_id: payoutId,
+				email_subject: "Test Payout from Hope KK NFTs",
+				email_message: "This is a test payout from the Hope KK NFT system."
+			},
+			items: [{
+				recipient_type: "EMAIL",
+				amount: {
+					value: payoutAmount.toFixed(2),
+					currency: "USD"
+				},
+				receiver: recipientEmail,
+				note: `Test payout - Amount: $${payoutAmount.toFixed(2)}`,
+				sender_item_id: payoutId
+			}]
+		});
+
+		console.log('🚀 Sending test payout...');
+		console.log('Recipient:', recipientEmail);
+		console.log('Amount:', payoutAmount);
+
+		// Execute the payout using your existing paypalClient
+		const response = await paypalClient.execute(payoutRequest);
+
+		console.log('✅ Test payout successful!');
+		console.log('Batch ID:', response.result.batch_header.payout_batch_id);
+		console.log('Status:', response.result.batch_header.batch_status);
+
+		res.json({
+			success: true,
+			message: 'Test payout sent successfully!',
+			payoutDetails: {
+				batchId: response.result.batch_header.payout_batch_id,
+				status: response.result.batch_header.batch_status,
+				amount: payoutAmount,
+				recipient: recipientEmail,
+				testPayoutId: payoutId
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Test payout failed:', error);
+
+		let errorMessage = 'Test payout failed';
+		if (error.response && error.response.data) {
+			const errorData = error.response.data;
+			if (errorData.details && errorData.details.length > 0) {
+				errorMessage = errorData.details[0].description || errorMessage;
+			}
+		}
+
+		res.status(500).json({
+			success: false,
+			error: errorMessage,
+			details: error.message
+		});
+	}
+});
+
+// ADD: Get current payout limits with admin authentication
+app.get('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.json({
+				isSet: false,
+				totalLimit: 0,
+				remainingLimit: 0,
+				usedAmount: 0,
+				lastReset: null
+			});
+		}
+
+		const data = limitsDoc.data();
+		const remainingLimit = Math.max(0, data.totalLimit - (data.usedAmount || 0));
+
+		res.json({
+			isSet: true,
+			totalLimit: data.totalLimit || 0,
+			remainingLimit: remainingLimit,
+			usedAmount: data.usedAmount || 0,
+			lastReset: data.lastReset,
+			lastUpdated: data.lastUpdated
+		});
+	} catch (error) {
+		console.error('Error fetching payout limits:', error);
+		res.status(500).json({ error: 'Failed to fetch payout limits' });
+	}
+});
+
+app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const { totalLimit, fromDate, toDate, projectName, comments } = req.body;
+
+		// Validation
+		if (!totalLimit || totalLimit <= 0) {
+			return res.status(400).json({ error: 'Total limit must be greater than 0' });
+		}
+
+		if (totalLimit > 100000) {
+			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
+		}
+
+		// Validate dates if provided
+		if (fromDate && toDate) {
+			const from = new Date(fromDate);
+			const to = new Date(toDate);
+
+			if (from >= to) {
+				return res.status(400).json({ error: 'From date must be before To date' });
+			}
+		}
+
+		const now = new Date();
+		const disbursementId = `disbursement_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+		// Get current data for audit log
+		const currentDoc = await db.collection('admin_settings').doc('payout_limits').get();
+		const oldLimit = currentDoc.exists ? currentDoc.data().totalLimit : null;
+
+		// Mark previous disbursement as inactive
+		if (currentDoc.exists) {
+			const oldDisbursementId = currentDoc.data().disbursementId;
+			if (oldDisbursementId) {
+				try {
+					const historyQuery = await db.collection('disbursement_history')
+						.where('disbursementId', '==', oldDisbursementId)
+						.get();
+
+					const batch = db.batch();
+					historyQuery.docs.forEach(doc => {
+						batch.update(doc.ref, { isActive: false });
+					});
+					await batch.commit();
+				} catch (historyError) {
+					console.error('Error updating previous disbursement history:', historyError);
+				}
+			}
+		}
+
+		// Set the new payout limit with disbursement ID
+		await db.collection('admin_settings').doc('payout_limits').set({
+			totalLimit: parseFloat(totalLimit),
+			usedAmount: 0, // Reset used amount when setting new limit
+			lastReset: now,
+			updatedAt: now,
+			updatedBy: 'admin',
+			disbursementId: disbursementId, // Track this disbursement
+			fromDate: fromDate || null,
+			toDate: toDate || null,
+			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+			projectName: projectName || null
+		});
+
+		// Record this disbursement in history
+		await db.collection('disbursement_history').add({
+			disbursementId: disbursementId,
+			totalLimit: parseFloat(totalLimit),
+			fromDate: fromDate || null,
+			toDate: toDate || null,
+			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+			projectName: projectName || null,
+			comments: comments || null,
+			usedAmount: 0,
+			isActive: true,
+			createdAt: now.toISOString(),
+			createdBy: 'admin',
+			startDate: now.toISOString()
+		});
+
+		// Log the change for audit trail
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_updated',
+			oldLimit: oldLimit,
+			newLimit: parseFloat(totalLimit),
+			oldDisbursementId: currentDoc.exists ? currentDoc.data().disbursementId : null,
+			newDisbursementId: disbursementId,
+			fromDate: fromDate,
+			toDate: toDate,
+			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+			projectName: projectName,
+			timestamp: now,
+			adminId: 'admin',
+			ip: req.ip
+		});
+
+		console.log(`✅ New disbursement created: ${disbursementId} with limit $${totalLimit}`);
+
+		res.json({
+			success: true,
+			message: 'New disbursement created successfully',
+			disbursementId: disbursementId,
+			totalLimit: parseFloat(totalLimit),
+			remainingLimit: parseFloat(totalLimit)
+		});
+	} catch (error) {
+		console.error('Error setting payout limits:', error);
+		res.status(500).json({ error: 'Failed to set payout limits' });
+	}
+});
+
+app.get('/api/admin/user-withdrawal-breakdown/:walletAddress', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
+
+		// Get disbursement history for context
+		const disbursementHistory = await db.collection('disbursement_history')
+			.orderBy('createdAt', 'desc')
+			.get();
+
+		const disbursements = [];
+		disbursementHistory.forEach(doc => {
+			disbursements.push({
+				id: doc.id,
+				disbursementId: doc.data().disbursementId,
+				totalLimit: doc.data().totalLimit,
+				period: doc.data().period,
+				isActive: doc.data().isActive,
+				createdAt: doc.data().createdAt
+			});
+		});
+
+		res.json({
+			success: true,
+			walletAddress: walletAddress,
+			withdrawalData: withdrawalData,
+			disbursementHistory: disbursements
+		});
+
+	} catch (error) {
+		console.error('Error getting withdrawal breakdown:', error);
+		res.status(500).json({ error: 'Failed to get withdrawal breakdown' });
+	}
+});
+
+// ADD: Reset payout limits (manual reset)
+app.post('/api/admin/payout-limits/reset', authenticateAdmin, async (req, res) => {
+	try {
+		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
+
+		if (!limitsDoc.exists) {
+			return res.status(404).json({ error: 'Payout limits not configured' });
+		}
+
+		const data = limitsDoc.data();
+		const now = new Date();
+
+		await db.collection('admin_settings').doc('payout_limits').update({
+			usedAmount: 0,
+			lastReset: now,
+			updatedAt: now
+		});
+
+		// Log the reset
+		await db.collection('admin_audit_log').add({
+			action: 'payout_limit_reset',
+			previousUsedAmount: data.usedAmount,
+			timestamp: now,
+			adminId: 'admin',
+			ip: req.ip
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limits reset successfully',
+			remainingLimit: data.totalLimit
+		});
+	} catch (error) {
+		console.error('Error resetting payout limits:', error);
+		res.status(500).json({ error: 'Failed to reset payout limits' });
+	}
+});
+
+// Admin endpoint to set payout limit
+app.post('/api/admin/set-payout-limit', cors(corsOptions), async (req, res) => {
+	try {
+		const { limitAmount, adminKey } = req.body;
+
+		// Simple admin authentication
+		if (adminKey !== process.env.ADMIN_KEY) {
+			return res.status(401).json({ error: 'Unauthorized' });
+		}
+
+		await db.collection('admin').doc('payoutLimits').set({
+			totalLimit: parseFloat(limitAmount),
+			remainingLimit: parseFloat(limitAmount), // Initialize remaining with full amount
+			updatedAt: new Date().toISOString(),
+			updatedBy: 'admin'
+		});
+
+		res.json({
+			success: true,
+			message: 'Payout limit set successfully',
+			totalLimit: parseFloat(limitAmount),
+			remainingLimit: parseFloat(limitAmount)
+		});
+
+	} catch (error) {
+		console.error('Error setting payout limit:', error);
+		res.status(500).json({ error: 'Internal server error' });
+	}
+});
+
+// GET disbursement history with pagination
+app.get('/api/admin/disbursement-history', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const {
+			page = 1,
+			limit = 10,
+			search = ''
+		} = req.query;
+
+		console.log('🔍 Fetching disbursement history with filters:', { page, limit, search });
+
+		// Build query
+		let query = db.collection('disbursement_history');
+
+		// Apply search filter if provided
+		if (search) {
+			// Since Firestore doesn't support full-text search, we'll get all and filter in memory
+			// For production, consider using Algolia or similar for better search
+		}
+
+		// Get all documents (we'll handle pagination in memory for simplicity)
+		const snapshot = await query.orderBy('createdAt', 'desc').get();
+
+		let allRecords = [];
+		snapshot.forEach(doc => {
+			const data = doc.data();
+			allRecords.push({
+				id: doc.id,
+				...data,
+				// Ensure createdAt is properly formatted
+				createdAt: data.createdAt || new Date().toISOString()
+			});
+		});
+
+		// Apply search filter in memory
+		if (search) {
+			const searchLower = search.toLowerCase();
+			allRecords = allRecords.filter(record =>
+				(record.period && record.period.toLowerCase().includes(searchLower)) ||
+				(record.projectName && record.projectName.toLowerCase().includes(searchLower)) ||
+				(record.comments && record.comments.toLowerCase().includes(searchLower)) ||
+				(record.disbursementId && record.disbursementId.toLowerCase().includes(searchLower))
+			);
+		}
+
+		// Calculate statistics
+		const stats = {
+			totalDisbursements: allRecords.length,
+			totalAmountDisbursed: allRecords.reduce((sum, record) => sum + (record.totalLimit || 0), 0),
+			totalAmountUsed: allRecords.reduce((sum, record) => sum + (record.usedAmount || 0), 0),
+			activeDisbursements: allRecords.filter(record => record.isActive).length
+		};
+
+		// Apply pagination
+		const totalRecords = allRecords.length;
+		const totalPages = Math.ceil(totalRecords / parseInt(limit));
+		const startIndex = (parseInt(page) - 1) * parseInt(limit);
+		const endIndex = startIndex + parseInt(limit);
+
+		const paginatedRecords = allRecords.slice(startIndex, endIndex);
+
+		// Pagination info
+		const pagination = {
+			currentPage: parseInt(page),
+			totalPages,
+			totalRecords,
+			hasNextPage: parseInt(page) < totalPages,
+			hasPrevPage: parseInt(page) > 1
+		};
+
+		console.log(`✅ Returning ${paginatedRecords.length} of ${totalRecords} disbursement records (page ${page}/${totalPages})`);
+
+		res.json({
+			success: true,
+			records: paginatedRecords,
+			pagination,
+			stats,
+			filters: { search }
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching disbursement history:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+
+/*ARTIST DAPP SERVER STARTS*/
+
+app.post('/api/artists/register', cors(corsOptions), async (req, res) => {
+	try {
+		const { name, email, mobile, password } = req.body;
+
+		// Enhanced validation
+		if (!name || !email || !mobile || !password) {
+			return res.status(400).json({
+				error: 'All fields are required',
+				missingFields: {
+					name: !name,
+					email: !email,
+					mobile: !mobile,
+					password: !password
+				}
+			});
+		}
+
+		// Validate name length
+		if (name.length > 15) {
+			return res.status(400).json({
+				error: 'Name must be 15 characters or less'
+			});
+		}
+
+		if (name.length < 2) {
+			return res.status(400).json({
+				error: 'Name must be at least 2 characters'
+			});
+		}
+
+		// Validate email format
+		const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+		if (!emailRegex.test(email)) {
+			return res.status(400).json({
+				error: 'Please enter a valid email address (e.g., user@gmail.com)'
+			});
+		}
+
+		// Validate password length
+		if (password.length < 6) {
+			return res.status(400).json({
+				error: 'Password must be at least 6 characters long'
+			});
+		}
+
+		// Validate mobile number
+		if (!mobile || mobile.length < 10) {
+			return res.status(400).json({
+				error: 'Please enter a valid mobile number'
+			});
+		}
+
+		console.log('🔍 Artist registration attempt:', {
+			name: name.trim(),
+			email: email.toLowerCase().trim(),
+			mobile: mobile
+		});
+
+		// Check if artist already exists
+		const existingArtist = await db.collection('artists')
+			.where('email', '==', email.toLowerCase().trim())
+			.limit(1)
+			.get();
+
+		if (!existingArtist.empty) {
+			console.log('❌ Artist already exists:', email);
+			return res.status(409).json({
+				error: 'An account with this email already exists. Please try logging in instead.'
+			});
+		}
+
+		// Create artist data - INCLUDING NAME
+		const artistData = {
+			name: name.trim(), // ✅ FIXED: Added name field
+			email: email.toLowerCase().trim(),
+			mobile: mobile.trim(),
+			password: password, // Note: In production, hash this password
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		};
+
+		console.log('💾 Saving artist data:', artistData);
+
+		// Save to Firebase
+		const docRef = await db.collection('artists').add(artistData);
+
+		console.log('✅ Artist registered successfully:', {
+			id: docRef.id,
+			name: artistData.name,
+			email: artistData.email
+		});
+
+		res.status(201).json({
+			success: true,
+			message: 'Artist registered successfully! You can now log in.',
+			artistId: docRef.id,
+			name: artistData.name
+		});
+
+	} catch (error) {
+		console.error('❌ Error registering artist:', error);
+		res.status(500).json({
+			error: 'Registration failed. Please try again.',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+app.post('/api/artists/login', cors(corsOptions), async (req, res) => {
+	try {
+		const { email, password } = req.body;
+
+		if (!email || !password) {
+			return res.status(400).json({
+				error: 'Email and password are required'
+			});
+		}
+
+		// Validate email format
+		const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+		if (!emailRegex.test(email)) {
+			return res.status(400).json({
+				error: 'Please enter a valid email address'
+			});
+		}
+
+		console.log('🔍 Login attempt for:', email.toLowerCase().trim());
+
+		// Find artist - search by email and password
+		const artistQuery = await db.collection('artists')
+			.where('email', '==', email.toLowerCase().trim())
+			.where('password', '==', password)
+			.limit(1)
+			.get();
+
+		if (artistQuery.empty) {
+			console.log('❌ Login failed - invalid credentials for:', email);
+			return res.status(401).json({
+				error: 'Invalid email or password. Please check your credentials and try again.'
+			});
+		}
+
+		const artistDoc = artistQuery.docs[0];
+		const artistData = artistDoc.data();
+
+		// Update last login time
+		await artistDoc.ref.update({
+			lastLoginAt: new Date().toISOString()
+		});
+
+		console.log('✅ Login successful for:', {
+			id: artistDoc.id,
+			name: artistData.name,
+			email: artistData.email
+		});
+
+		// Return artist data - INCLUDING NAME
+		res.json({
+			success: true,
+			message: 'Login successful',
+			artist: {
+				id: artistDoc.id,
+				name: artistData.name || 'Artist', // ✅ FIXED: Include name field
+				email: artistData.email,
+				mobile: artistData.mobile,
+				createdAt: artistData.createdAt,
+				lastLoginAt: new Date().toISOString()
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error during login:', error);
+		res.status(500).json({
+			error: 'Login failed. Please try again.',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+app.post('/api/artists/create-project', cors(corsOptions), async (req, res) => {
+	let tempImagePath = null;
+
+	try {
+		const { artistId, projectName, projectSymbol, totalSupply, mintPrice, contractOwner, image } = req.body;
+
+		console.log('🎨 Creating project for artist:', artistId);
+		console.log('📊 Project details:', {
+			projectName,
+			projectSymbol,
+			totalSupply,
+			mintPrice,
+			contractOwner,
+			hasImage: !!image
+		});
+
+		// Enhanced validation with specific error messages
+		const missingFields = {};
+		if (!artistId) missingFields.artistId = true;
+		if (!projectName || !projectName.trim()) missingFields.projectName = true;
+		if (!projectSymbol || !projectSymbol.trim()) missingFields.projectSymbol = true;
+		if (!totalSupply) missingFields.totalSupply = true;
+		if (mintPrice === undefined || mintPrice === null || mintPrice === '') missingFields.mintPrice = true;
+		if (!contractOwner || !contractOwner.trim()) missingFields.contractOwner = true;
+		if (!image) missingFields.image = true;
+
+		if (Object.keys(missingFields).length > 0) {
+			return res.status(400).json({
+				error: 'All fields are required',
+				missingFields: missingFields
+			});
+		}
+
+		// Validate project name
+		if (projectName.trim().length < 2) {
+			return res.status(400).json({
+				error: 'Project name must be at least 2 characters long'
+			});
+		}
+
+		if (projectName.trim().length > 50) {
+			return res.status(400).json({
+				error: 'Project name must be 50 characters or less'
+			});
+		}
+
+		// Validate project symbol
+		if (projectSymbol.trim().length < 1) {
+			return res.status(400).json({
+				error: 'Project symbol is required'
+			});
+		}
+
+		if (projectSymbol.trim().length > 10) {
+			return res.status(400).json({
+				error: 'Project symbol must be 10 characters or less'
+			});
+		}
+
+		// Validate total supply
+		const supply = parseInt(totalSupply);
+		if (isNaN(supply) || supply < 1) {
+			return res.status(400).json({
+				error: 'Total supply must be at least 1'
+			});
+		}
+
+		if (supply > 1000000) {
+			return res.status(400).json({
+				error: 'Total supply cannot exceed 1,000,000'
+			});
+		}
+
+		// Validate mint price
+		const price = parseFloat(mintPrice);
+		if (isNaN(price) || price < 0) {
+			return res.status(400).json({
+				error: 'Mint price cannot be negative'
+			});
+		}
+
+		if (price > 10000) {
+			return res.status(400).json({
+				error: 'Mint price cannot exceed $10,000'
+			});
+		}
+
+		// Validate contract owner address
+		const ethAddressRegex = /^0x[a-fA-F0-9]{40}$/;
+		if (!ethAddressRegex.test(contractOwner.trim())) {
+			return res.status(400).json({
+				error: 'Invalid contract owner address format. Must be a valid Ethereum address (0x followed by 40 hex characters).'
+			});
+		}
+
+		const artistDoc = await db.collection('artists').doc(artistId).get();
+		if (!artistDoc.exists) {
+			console.log('❌ Artist not found:', artistId);
+			return res.status(404).json({
+				error: 'Artist account not found. Please log in again.'
+			});
+		}
+
+		const artistData = artistDoc.data();
+		console.log('✅ Artist found:', {
+			name: artistData.name,
+			email: artistData.email
+		});
+
+		// Check for duplicate project symbol
+		const existingSymbol = await db.collection('artist_projects')
+			.where('projectSymbol', '==', projectSymbol.trim().toUpperCase())
+			.limit(1)
+			.get();
+
+		if (!existingSymbol.empty) {
+			console.log('❌ Duplicate project symbol:', projectSymbol);
+			return res.status(409).json({
+				error: `Project symbol "${projectSymbol.trim().toUpperCase()}" already exists. Please choose a different symbol.`
+			});
+		}
+
+		// NEW: Check for duplicate project name
+		const existingName = await db.collection('artist_projects')
+			.where('projectName', '==', projectName.trim())
+			.limit(1)
+			.get();
+
+		if (!existingName.empty) {
+			console.log('❌ Duplicate project name:', projectName);
+			return res.status(409).json({
+				error: `Project name "${projectName.trim()}" already exists. Please choose a different name.`
+			});
+		}
+
+		// Process and upload image to IPFS
+		let imageIpfsData = null;
+		if (image) {
+			try {
+				console.log('📸 Processing project image...');
+
+				// Remove data URL prefix if present
+				const base64Data = image.replace(/^data:image\/[a-z]+;base64,/, '');
+				let imageBuffer = Buffer.from(base64Data, 'base64');
+
+				// Validate image size (10MB limit)
+				if (imageBuffer.length > 10 * 1024 * 1024) {
+					return res.status(400).json({
+						error: 'Image size must be less than 10MB'
+					});
+				}
+
+				// Compress image if it's larger than 1MB
+				if (imageBuffer.length > 1 * 1024 * 1024) {
+					console.log('🔄 Compressing large image...');
+					imageBuffer = await compressImage(imageBuffer);
+					console.log(`✅ Image compressed to ${(imageBuffer.length / 1024 / 1024).toFixed(2)}MB`);
+				}
+
+				// Generate unique filename
+				const fileName = `artist_project_${artistId}_${Date.now()}.jpg`;
+
+				// Upload to IPFS with improved function
+				imageIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName, 3);
+
+				console.log('✅ Project image uploaded to IPFS:', imageIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('❌ IPFS upload failed:', ipfsError);
+				return res.status(500).json({
+					error: 'Failed to upload image. Please try again with a smaller image or different format.'
+				});
+			}
+		}
+
+		// Create project data with contract owner
+		const projectData = {
+			artistId: artistId,
+			artistName: artistData.name,
+			artistEmail: artistData.email,
+			projectName: projectName.trim(),
+			projectSymbol: projectSymbol.trim().toUpperCase(),
+			totalSupply: supply,
+			mintPrice: price,
+			contractOwner: contractOwner.trim(),
+			imageIpfsUrl: imageIpfsData?.ipfsUrl || null,
+			imageIpfsHash: imageIpfsData?.ipfsHash || null,
+			status: 'pending',
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		};
+
+		// Save to Firebase
+		const projectRef = await db.collection('artist_projects').add(projectData);
+
+		console.log('✅ New artist project created successfully:', {
+			projectId: projectRef.id,
+			artistName: artistData.name,
+			artistEmail: artistData.email,
+			projectName: projectName.trim(),
+			projectSymbol: projectSymbol.trim().toUpperCase(),
+			contractOwner: contractOwner.trim(),
+			ipfsUrl: imageIpfsData?.ipfsUrl
+		});
+
+		res.status(201).json({
+			success: true,
+			message: 'Project created successfully and is pending approval',
+			project: {
+				id: projectRef.id,
+				...projectData
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error creating project:', error);
+
+		// Clean up temporary file if it exists
+		if (tempImagePath && fs.existsSync(tempImagePath)) {
+			fs.unlinkSync(tempImagePath);
+		}
+
+		res.status(500).json({
+			error: 'Failed to create project. Please try again.',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+app.get('/api/artists/:artistId/projects', cors(corsOptions), async (req, res) => {
+	try {
+		const { artistId } = req.params;
+
+		console.log(`📋 Fetching projects for artist: ${artistId}`);
+
+		const artistDoc = await db.collection('artists').doc(artistId).get();
+		if (!artistDoc.exists) {
+			return res.status(404).json({ error: 'Artist not found' });
+		}
+
+		let query = db.collection('artist_projects')
+			.where('artistId', '==', artistId);
+
+		const projectsSnapshot = await query.get();
+
+		const projects = [];
+		projectsSnapshot.forEach(doc => {
+			const projectData = doc.data();
+			// ADD THIS LOG to see what's being returned
+			console.log(`Project: ${projectData.projectName}, ArtistId: ${projectData.artistId}, Expected: ${artistId}`);
+
+			projects.push({
+				id: doc.id,
+				...projectData
+			});
+		});
+
+		projects.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+		console.log(`✅ Found ${projects.length} projects for artist ${artistId}`);
+
+		res.json({
+			success: true,
+			projects: projects
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching projects:', error);
+		res.status(500).json({ error: 'Failed to fetch projects' });
+	}
+});
+
+// Update project (with IPFS image update support)
+app.put('/api/artists/projects/:projectId', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { projectName, projectSymbol, totalSupply, mintPrice, artistId, image } = req.body;
+
+		// Get existing project
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		if (!projectDoc.exists) {
+			return res.status(404).json({ error: 'Project not found' });
+		}
+
+		const existingData = projectDoc.data();
+
+		// Verify artist owns this project
+		if (existingData.artistId !== artistId) {
+			return res.status(403).json({ error: 'Access denied' });
+		}
+
+		// Prepare update data
+		const updateData = {
+			updatedAt: new Date().toISOString()
+		};
+
+		if (projectName) updateData.projectName = projectName.trim();
+		if (projectSymbol) updateData.projectSymbol = projectSymbol.trim().toUpperCase();
+		if (totalSupply) updateData.totalSupply = parseInt(totalSupply);
+		if (mintPrice) updateData.mintPrice = parseFloat(mintPrice);
+
+		// Handle image update
+		if (image) {
+			try {
+				// Remove data URL prefix if present
+				const base64Data = image.replace(/^data:image\/[a-z]+;base64,/, '');
+				const imageBuffer = Buffer.from(base64Data, 'base64');
+
+				// Generate unique filename
+				const fileName = `artist_project_update_${artistId}_${Date.now()}.jpg`;
+
+				// Upload new image to IPFS
+				const imageIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName);
+
+				// Update with new IPFS data
+				updateData.imageIpfsUrl = imageIpfsData.ipfsUrl;
+				updateData.imageIpfsHash = imageIpfsData.ipfsHash;
+
+				console.log('Project image updated on IPFS:', imageIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('IPFS upload failed during update:', ipfsError);
+				return res.status(500).json({ error: 'Failed to upload updated image to IPFS' });
+			}
+		}
+
+		// Update in database
+		await db.collection('artist_projects').doc(projectId).update(updateData);
+
+		res.json({
+			success: true,
+			message: 'Project updated successfully',
+			project: {
+				id: projectId,
+				...existingData,
+				...updateData
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating project:', error);
+		res.status(500).json({ error: 'Failed to update project' });
+	}
+});
+
+// Delete project
+app.delete('/api/artists/projects/:projectId', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { artistId } = req.body;
+
+		// Get project
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		if (!projectDoc.exists) {
+			return res.status(404).json({ error: 'Project not found' });
+		}
+
+		const projectData = projectDoc.data();
+
+		// Verify artist owns this project
+		if (projectData.artistId !== artistId) {
+			return res.status(403).json({ error: 'Access denied' });
+		}
+
+		// Delete from database (IPFS files remain on IPFS network)
+		await db.collection('artist_projects').doc(projectId).delete();
+
+		console.log('🗑️ Deleted project:', projectId, 'IPFS URL:', projectData.imageIpfsUrl);
+
+		res.json({
+			success: true,
+			message: 'Project deleted successfully'
+		});
+
+	} catch (error) {
+		console.error('❌ Error deleting project:', error);
+		res.status(500).json({ error: 'Failed to delete project' });
+	}
+});
+
+// Admin endpoints for project management
+app.get('/api/admin/artist-projects', cors(corsOptions), async (req, res) => {
+	try {
+		const { status = 'all', limit = 10, page = 1, search = '' } = req.query;
+
+		console.log('🔍 Fetching admin artist projects:', { status, limit, page, search });
+
+		// Get ALL projects first (without filtering by status initially)
+		let query = db.collection('artist_projects')
+			.orderBy('createdAt', 'desc');
+
+		const snapshot = await query.get();
+
+		let projects = [];
+		snapshot.forEach(doc => {
+			projects.push({
+				id: doc.id,
+				...doc.data()
+			});
+		});
+
+		// Apply status filter in memory
+		if (status && status !== 'all' && status !== '') {
+			console.log('🔍 Filtering by status:', status);
+			projects = projects.filter(project => project.status === status);
+		}
+
+		// Apply search filter if provided
+		if (search && search.trim() !== '') {
+			const searchLower = search.toLowerCase().trim();
+			console.log('🔍 Filtering by search:', searchLower);
+			projects = projects.filter(project =>
+				project.projectName?.toLowerCase().includes(searchLower) ||
+				project.projectSymbol?.toLowerCase().includes(searchLower) ||
+				project.artistName?.toLowerCase().includes(searchLower) ||
+				project.artistEmail?.toLowerCase().includes(searchLower)
+			);
+		}
+
+		// Calculate pagination
+		const total = projects.length;
+		const limitNum = parseInt(limit) || 10;
+		const pageNum = parseInt(page) || 1;
+		const startIndex = (pageNum - 1) * limitNum;
+		const endIndex = startIndex + limitNum;
+		const paginatedProjects = projects.slice(startIndex, endIndex);
+
+		// Calculate stats
+		const allProjects = projects; // Keep reference to all projects for stats
+		const stats = {
+			total: allProjects.length,
+			pending: allProjects.filter(p => p.status === 'pending').length,
+			approved: allProjects.filter(p => p.status === 'approved').length,
+			rejected: allProjects.filter(p => p.status === 'rejected').length
+		};
+
+		console.log('✅ Sending response:', {
+			projectsCount: paginatedProjects.length,
+			totalProjects: total,
+			stats: stats
+		});
+
+		res.json({
+			success: true,
+			projects: paginatedProjects,
+			stats: stats,
+			pagination: {
+				page: pageNum,
+				limit: limitNum,
+				total: total,
+				totalPages: Math.ceil(total / limitNum)
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching admin projects:', error);
+		res.status(500).json({
+			error: 'Failed to fetch projects',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
+});
+
+// Admin approve/reject project
+app.put('/api/admin/artist-projects/:projectId/status', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { status, rejectionReason } = req.body;
+
+		if (!['approved', 'rejected'].includes(status)) {
+			return res.status(400).json({ error: 'Invalid status. Must be approved or rejected.' });
+		}
+
+		const updateData = {
+			status: status,
+			updatedAt: new Date().toISOString(),
+			reviewedAt: new Date().toISOString()
+		};
+
+		if (status === 'rejected' && rejectionReason) {
+			updateData.rejectionReason = rejectionReason;
+		}
+
+		await db.collection('artist_projects').doc(projectId).update(updateData);
+
+		res.json({
+			success: true,
+			message: `Project ${status} successfully`,
+			status: status
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating project status:', error);
+		res.status(500).json({ error: 'Failed to update project status' });
+	}
+});
+
+// Get project by artist name and project name
+app.get('/api/public/projects/:artistName/:projectName', cors(corsOptions), async (req, res) => {
+    try {
+        const { artistName, projectName } = req.params;
+        
+        // Decode URL-encoded names
+        const decodedArtistName = decodeURIComponent(artistName).toLowerCase();
+        const decodedProjectName = decodeURIComponent(projectName).toLowerCase();
+        
+        console.log(`🔍 Fetching project: ${decodedArtistName}/${decodedProjectName}`);
+        
+        // Get all projects and filter in memory (case-insensitive)
+        const allProjectsSnapshot = await db.collection('artist_projects').get();
+        
+        let foundProject = null;
+        let foundProjectId = null;
+        
+        allProjectsSnapshot.forEach(doc => {
+            const data = doc.data();
+            if (data.artistName && data.projectName) {
+                if (data.artistName.toLowerCase() === decodedArtistName && 
+                    data.projectName.toLowerCase() === decodedProjectName) {
+                    foundProject = data;
+                    foundProjectId = doc.id;
+                }
+            }
+        });
+        
+        if (!foundProject) {
+            console.log('❌ Project not found');
+            return res.status(404).json({ 
+                error: 'Project not found' 
+            });
+        }
+        
+        console.log('✅ Project found:', foundProject.projectName);
+        
+        res.json({
+            success: true,
+            project: {
+                id: foundProjectId,
+                ...foundProject
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Error fetching project:', error);
+        res.status(500).json({ 
+            error: 'Failed to fetch project',
+            details: error.message
+        });
+    }
+});
+
+// Get all projects by artist name
+app.get('/api/public/artists/:artistName/projects', cors(corsOptions), async (req, res) => {
+    try {
+        const { artistName } = req.params;
+        
+        console.log(`🔍 Fetching projects for artist: ${artistName}`);
+        
+        const projectsSnapshot = await db.collection('artist_projects')
+            .where('artistName', '==', artistName)
+            .where('status', '==', 'approved')
+            .get();
+        
+        const projects = [];
+        projectsSnapshot.forEach(doc => {
+            projects.push({
+                id: doc.id,
+                ...doc.data()
+            });
+        });
+        
+        // Sort by creation date
+        projects.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        
+        res.json({
+            success: true,
+            projects: projects
+        });
+        
+    } catch (error) {
+        console.error('❌ Error fetching artist projects:', error);
+        res.status(500).json({ 
+            error: 'Failed to fetch projects',
+            details: error.message
+        });
+    }
+});
+// ============================================
+// FIXED PUBLIC PROJECT PAGE ENDPOINTS
+// ============================================
+
+app.post('/api/artists/verify-ownership', cors(corsOptions), async (req, res) => {
+    try {
+        const { artistId, projectName } = req.body;
+
+        if (!artistId || !projectName) {
+            return res.status(400).json({
+                error: 'Artist ID and project name are required'
+            });
+        }
+
+        console.log(`🔍 Verifying ownership for artist ${artistId} and project ${projectName}`);
+
+        // Get artist data
+        const artistDoc = await db.collection('artists').doc(artistId).get();
+        
+        if (!artistDoc.exists) {
+            return res.status(404).json({
+                error: 'Artist not found',
+                isOwner: false
+            });
+        }
+
+        const artistData = artistDoc.data();
+
+        // Find project by artistId and projectName (case-insensitive)
+        const allProjectsSnapshot = await db.collection('artist_projects')
+            .where('artistId', '==', artistId)
+            .get();
+
+        let foundProject = null;
+        let foundProjectId = null;
+
+        allProjectsSnapshot.forEach(doc => {
+            const data = doc.data();
+            if (data.projectName && 
+                data.projectName.toLowerCase() === projectName.toLowerCase()) {
+                foundProject = data;
+                foundProjectId = doc.id;
+            }
+        });
+
+        if (!foundProject) {
+            return res.json({
+                isOwner: false,
+                message: 'Project not found'
+            });
+        }
+
+        // Check if the artistId matches
+        const isOwner = foundProject.artistId === artistId;
+
+        console.log(`✅ Ownership verified: ${isOwner}`);
+
+        res.json({
+            isOwner: isOwner,
+            projectId: foundProjectId,
+            project: {
+                ...foundProject,
+                id: foundProjectId
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error verifying ownership:', error);
+        res.status(500).json({
+            error: 'Failed to verify ownership',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
+app.put('/api/artists/projects/:projectId/details', cors(corsOptions), async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const { artistId, description, coverImage, backgroundColor } = req.body;
+
+        console.log(`🔧 Updating project details for: ${projectId}`);
+
+        // Get project
+        const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+        
+        if (!projectDoc.exists) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        const projectData = projectDoc.data();
+
+        // Verify artist owns this project
+        if (projectData.artistId !== artistId) {
+            return res.status(403).json({ 
+                error: 'Access denied. You do not own this project.' 
+            });
+        }
+
+        // Prepare update data
+        const updateData = {
+            updatedAt: new Date().toISOString()
+        };
+
+        // Update description if provided
+        if (description !== undefined) {
+            updateData.description = description.trim();
+        }
+
+        // Update background color if provided
+        if (backgroundColor !== undefined && backgroundColor.trim()) {
+            updateData.backgroundColor = backgroundColor.trim();
+            console.log('✅ Background color updated:', backgroundColor.trim());
+        }
+
+        // Handle cover image upload to IPFS if provided
+        if (coverImage) {
+            try {
+                console.log('📸 Processing cover image...');
+
+                const base64Data = coverImage.replace(/^data:image\/[a-z]+;base64,/, '');
+                let imageBuffer = Buffer.from(base64Data, 'base64');
+
+                if (imageBuffer.length > 1 * 1024 * 1024) {
+                    return res.status(400).json({
+                        error: 'Cover image size must be less than 1MB'
+                    });
+                }
+
+                if (imageBuffer.length > 500 * 1024) {
+                    console.log('🔄 Compressing cover image...');
+                    imageBuffer = await compressImage(imageBuffer);
+                    console.log(`✅ Image compressed to ${(imageBuffer.length / 1024).toFixed(2)}KB`);
+                }
+
+                const fileName = `project_cover_${artistId}_${Date.now()}.jpg`;
+                const coverIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName, 3);
+
+                updateData.coverImageIpfsUrl = coverIpfsData.ipfsUrl;
+                updateData.coverImageIpfsHash = coverIpfsData.ipfsHash;
+
+                console.log('✅ Cover image uploaded to IPFS:', coverIpfsData.ipfsUrl);
+            } catch (ipfsError) {
+                console.error('❌ IPFS upload failed:', ipfsError);
+                return res.status(500).json({
+                    error: 'Failed to upload cover image. Please try again with a smaller image.'
+                });
+            }
+        }
+
+        // Update in database
+        await db.collection('artist_projects').doc(projectId).update(updateData);
+
+        console.log(`✅ Project details updated successfully for: ${projectData.projectName}`);
+
+        res.json({
+            success: true,
+            message: 'Project details updated successfully',
+            project: {
+                id: projectId,
+                ...projectData,
+                ...updateData
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error updating project details:', error);
+        res.status(500).json({
+            error: 'Failed to update project details',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
+// Get single project by ID - FIXED
+app.get('/api/public/projects/:projectId', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		
+		console.log(`🌐 Fetching public project: ${projectId}`);
+		
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		
+		if (!projectDoc.exists) {
+			console.log('❌ Project not found:', projectId);
+			return res.status(404).json({ 
+				error: 'Project not found' 
+			});
+		}
+		
+		const projectData = projectDoc.data();
+		console.log('✅ Project found:', projectData.projectName);
+		
+		res.json({
+			success: true,
+			project: {
+				id: projectDoc.id,
+				projectName: projectData.projectName,
+				projectSymbol: projectData.projectSymbol,
+				artistName: projectData.artistName,
+				artistEmail: projectData.artistEmail,
+				artistId: projectData.artistId,
+				totalSupply: projectData.totalSupply,
+				mintPrice: projectData.mintPrice,
+				imageIpfsUrl: projectData.imageIpfsUrl,
+				imageIpfsHash: projectData.imageIpfsHash,
+				status: projectData.status,
+				contractAddress: projectData.contractAddress || null,
+				networkId: projectData.networkId || null,
+				mintingEnabled: projectData.mintingEnabled || false,
+				createdAt: projectData.createdAt,
+				updatedAt: projectData.updatedAt,
+				rejectionReason: projectData.rejectionReason || null
+			}
+		});
+		
+	} catch (error) {
+		console.error('❌ Error fetching public project:', error);
+		res.status(500).json({ 
+			error: 'Failed to fetch project',
+			details: error.message
+		});
+	}
+});
+
+// Get all approved projects - FIXED VERSION
+app.get('/api/public/projects', cors(corsOptions), async (req, res) => {
+	try {
+		const { limit = 20, page = 1 } = req.query;
+		
+		console.log('🌐 Fetching all projects from artist_projects collection');
+		
+		// FIXED: Get ALL documents first, then filter in memory
+		const snapshot = await db.collection('artist_projects').get();
+		
+		console.log(`📊 Found ${snapshot.size} total documents`);
+		
+		const allProjects = [];
+		snapshot.forEach(doc => {
+			const data = doc.data();
+			console.log(`📄 Project: ${data.projectName}, Status: ${data.status}`);
+			allProjects.push({
+				id: doc.id,
+				projectName: data.projectName,
+				projectSymbol: data.projectSymbol,
+				artistName: data.artistName,
+				totalSupply: data.totalSupply,
+				mintPrice: data.mintPrice,
+				imageIpfsUrl: data.imageIpfsUrl,
+				contractAddress: data.contractAddress || null,
+				mintingEnabled: data.mintingEnabled || false,
+				status: data.status,
+				createdAt: data.createdAt
+			});
+		});
+		
+		// Filter approved projects in memory
+		const approvedProjects = allProjects.filter(p => p.status === 'approved');
+		
+		console.log(`✅ Found ${approvedProjects.length} approved projects out of ${allProjects.length} total`);
+		
+		// Sort by creation date (newest first)
+		approvedProjects.sort((a, b) => {
+			const dateA = new Date(a.createdAt || 0);
+			const dateB = new Date(b.createdAt || 0);
+			return dateB - dateA;
+		});
+		
+		// Pagination
+		const limitNum = parseInt(limit);
+		const pageNum = parseInt(page);
+		const startIndex = (pageNum - 1) * limitNum;
+		const endIndex = startIndex + limitNum;
+		const paginatedProjects = approvedProjects.slice(startIndex, endIndex);
+		
+		res.json({
+			success: true,
+			projects: paginatedProjects,
+			pagination: {
+				page: pageNum,
+				limit: limitNum,
+				total: approvedProjects.length,
+				totalPages: Math.ceil(approvedProjects.length / limitNum)
+			}
+		});
+		
+	} catch (error) {
+		console.error('❌ Error fetching public projects:', error);
+		console.error('Error details:', error.message);
+		console.error('Error stack:', error.stack);
+		res.status(500).json({ 
+			error: 'Failed to fetch projects',
+			details: error.message
+		});
+	}
+});
+
+// ============================================
+// ADMIN CONTRACT MANAGEMENT ENDPOINTS - FIXED
+// ============================================
+
+// Update contract details - FIXED
+// Update contract details - FIXED TO APPROVE AND ADD CONTRACT AT SAME TIME
+app.put('/api/admin/artist-projects/:projectId/contract', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { contractAddress, networkId, mintingEnabled } = req.body;
+		
+		console.log(`🔧 Approving and updating contract for project: ${projectId}`);
+		console.log('Contract data:', { contractAddress, networkId, mintingEnabled });
+		
+		// Validate contract address format
+		if (contractAddress && !/^0x[a-fA-F0-9]{40}$/.test(contractAddress)) {
+			return res.status(400).json({ 
+				error: 'Invalid contract address format. Must be 0x followed by 40 hex characters.' 
+			});
+		}
+		
+		// Get project
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		
+		if (!projectDoc.exists) {
+			return res.status(404).json({ 
+				error: 'Project not found' 
+			});
+		}
+		
+		const projectData = projectDoc.data();
+		
+		// REMOVED: Status check - we now approve AND add contract at the same time
+		
+		// Prepare update data - APPROVE + ADD CONTRACT
+		const updateData = {
+			status: 'approved', // ✅ APPROVE THE PROJECT
+			contractAddress: contractAddress.toLowerCase().trim(),
+			networkId: networkId || '137',
+			mintingEnabled: mintingEnabled !== false, // Default to true
+			contractAddedAt: new Date().toISOString(),
+			reviewedAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		};
+		
+		// Update in database
+		await db.collection('artist_projects').doc(projectId).update(updateData);
+		
+		console.log(`✅ Project APPROVED and contract added successfully for: ${projectData.projectName}`);
+		
+		res.json({
+			success: true,
+			message: 'Project approved and contract details added successfully',
+			project: {
+				id: projectId,
+				...projectData,
+				...updateData
+			}
+		});
+		
+	} catch (error) {
+		console.error('❌ Error approving and updating contract:', error);
+		res.status(500).json({ 
+			error: 'Failed to approve project and update contract details',
+			details: error.message
+		});
+	}
+});
+
+// Toggle minting status - FIXED
+app.patch('/api/admin/artist-projects/:projectId/toggle-minting', cors(corsOptions), async (req, res) => {
+	try {
+		const { projectId } = req.params;
+		const { mintingEnabled } = req.body;
+		
+		console.log(`🎯 Toggling minting for project: ${projectId} to ${mintingEnabled}`);
+		
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+		
+		if (!projectDoc.exists) {
+			return res.status(404).json({ 
+				error: 'Project not found' 
+			});
+		}
+		
+		const projectData = projectDoc.data();
+		
+		// Validate project has contract
+		if (!projectData.contractAddress) {
+			return res.status(400).json({ 
+				error: 'Cannot enable minting without contract address. Please add contract details first.' 
+			});
+		}
+		
+		// Update minting status
+		await db.collection('artist_projects').doc(projectId).update({
+			mintingEnabled: mintingEnabled,
+			mintingToggledAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString()
+		});
+		
+		console.log(`✅ Minting ${mintingEnabled ? 'enabled' : 'disabled'} for: ${projectData.projectName}`);
+		
+		res.json({
+			success: true,
+			message: `Minting ${mintingEnabled ? 'enabled' : 'disabled'} successfully`,
+			mintingEnabled: mintingEnabled
+		});
+		
+	} catch (error) {
+		console.error('❌ Error toggling minting:', error);
+		res.status(500).json({ 
+			error: 'Failed to toggle minting status',
+			details: error.message
+		});
+	}
+});
+
+// DEBUG ENDPOINT - Test database connection
+app.get('/api/debug/artist-projects', cors(corsOptions), async (req, res) => {
+	try {
+		console.log('🔍 DEBUG: Testing artist_projects collection');
+		
+		const snapshot = await db.collection('artist_projects').get();
+		
+		const projects = [];
+		snapshot.forEach(doc => {
+			projects.push({
+				id: doc.id,
+				data: doc.data()
+			});
+		});
+		
+		console.log(`✅ DEBUG: Found ${projects.length} projects`);
+		
+		res.json({
+			success: true,
+			count: projects.length,
+			projects: projects
+		});
+		
+	} catch (error) {
+		console.error('❌ DEBUG ERROR:', error);
+		res.status(500).json({ 
+			error: 'Debug failed',
+			details: error.message
+		});
+	}
+});
+
+// Add this endpoint for real-time project name checking
+app.post('/api/artists/check-project-name', cors(corsOptions), async (req, res) => {
+    try {
+        const { projectName, artistId } = req.body;
+
+        if (!projectName || !projectName.trim()) {
+            return res.status(400).json({
+                error: 'Project name is required'
+            });
+        }
+
+        if (!artistId) {
+            return res.status(400).json({
+                error: 'Artist ID is required'
+            });
+        }
+
+        // Check if project name already exists
+        const existingProject = await db.collection('artist_projects')
+            .where('projectName', '==', projectName.trim())
+            .limit(1)
+            .get();
+
+        res.json({
+            available: existingProject.empty,
+            projectName: projectName.trim()
+        });
+
+    } catch (error) {
+        console.error('❌ Error checking project name:', error);
+        res.status(500).json({
+            error: 'Failed to check project name availability'
+        });
+    }
+});
+
+// Add this endpoint for real-time project symbol availability checking
+app.post('/api/artists/check-project-symbol', cors(corsOptions), async (req, res) => {
+    try {
+        const { projectSymbol, artistId } = req.body;
+
+        if (!projectSymbol || !projectSymbol.trim()) {
+            return res.status(400).json({
+                error: 'Project symbol is required'
+            });
+        }
+
+        if (!artistId) {
+            return res.status(400).json({
+                error: 'Artist ID is required'
+            });
+        }
+
+        console.log('🔍 Checking project symbol availability:', projectSymbol.trim().toUpperCase());
+
+        // Check if project symbol already exists
+        const existingProject = await db.collection('artist_projects')
+            .where('projectSymbol', '==', projectSymbol.trim().toUpperCase())
+            .limit(1)
+            .get();
+
+        const available = existingProject.empty;
+        
+        console.log(`✅ Project symbol "${projectSymbol.trim().toUpperCase()}" is ${available ? 'available' : 'taken'}`);
+
+        res.json({
+            available: available,
+            projectSymbol: projectSymbol.trim().toUpperCase()
+        });
+
+    } catch (error) {
+        console.error('❌ Error checking project symbol:', error);
+        res.status(500).json({
+            error: 'Failed to check project symbol availability',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
+/*ARTIST DAPP SERVER ENDS*/
+
+
+module.exports = {
+	calculateUserPayout,
+	getTotalPayoutPool,
+	getUserPayoutHistory,
+	sendPayoutConfirmationEmail
+};
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+	console.log(`Server running on port ${PORT}`);
+});
