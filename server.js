@@ -4266,9 +4266,9 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 
 		// Check the remaining balance rule
 		const remainingAfterWithdrawal = availableAmount - withdrawAmount;
-		if (remainingAfterWithdrawal > 0 && remainingAfterWithdrawal < 1.00) {
+		if (remainingAfterWithdrawal > 0 && remainingAfterWithdrawal < 0.10) {
 			return res.status(400).json({
-				error: `Withdrawal would leave $${remainingAfterWithdrawal.toFixed(2)}. Please withdraw the full amount or leave at least $1.00`
+				error: `Withdrawal would leave $${remainingAfterWithdrawal.toFixed(2)}. Please withdraw the full amount or leave at least $0.10`
 			});
 		}
 
