@@ -4264,6 +4264,9 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			});
 		}
 
+		// Check the remaining balance rule
+		const remainingAfterWithdrawal = availableAmount - withdrawAmount;
+
 		// Check if disbursement pool has enough funds
 		const limitsDoc = await db.collection('admin_settings').doc('payout_limits').get();
 		if (!limitsDoc.exists) {
