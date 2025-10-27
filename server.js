@@ -3368,7 +3368,7 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 		const payouts = paypalData.payouts || [];
 
 		// Filter only completed payouts
-		const completedPayouts = payouts.filter(payout => 
+		const completedPayouts = payouts.filter(payout =>
 			payout.status === 'completed'
 		);
 
@@ -3381,14 +3381,14 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 
 		// Group withdrawals by disbursement ID
 		const withdrawalsByDisbursement = {};
-		
+
 		completedPayouts.forEach(payout => {
 			const disbursementId = payout.disbursementId || 'unknown';
-			
+
 			if (!withdrawalsByDisbursement[disbursementId]) {
 				withdrawalsByDisbursement[disbursementId] = 0;
 			}
-			
+
 			withdrawalsByDisbursement[disbursementId] += parseFloat(payout.amount) || 0;
 		});
 
@@ -4252,9 +4252,9 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		console.log('💵 Withdrawal amount:', withdrawAmount.toFixed(2));
 
 		// Validate withdrawal amount
-		if (!withdrawAmount || withdrawAmount < 1.00) {
+		if (!withdrawAmount || withdrawAmount < 0.10) {  // ← Changed to 0.10
 			return res.status(400).json({
-				error: `Minimum payout amount is $1.00. You requested: $${withdrawAmount?.toFixed(2) || '0.00'}`
+				error: `Minimum payout amount is $0.10. You requested: ...`  // ← Changed to $0.10
 			});
 		}
 
@@ -6517,286 +6517,286 @@ app.put('/api/admin/artist-projects/:projectId/status', cors(corsOptions), async
 
 // Get project by artist name and project name
 app.get('/api/public/projects/:artistName/:projectName', cors(corsOptions), async (req, res) => {
-    try {
-        const { artistName, projectName } = req.params;
-        
-        // Decode URL-encoded names
-        const decodedArtistName = decodeURIComponent(artistName).toLowerCase();
-        const decodedProjectName = decodeURIComponent(projectName).toLowerCase();
-        
-        console.log(`🔍 Fetching project: ${decodedArtistName}/${decodedProjectName}`);
-        
-        // Get all projects and filter in memory (case-insensitive)
-        const allProjectsSnapshot = await db.collection('artist_projects').get();
-        
-        let foundProject = null;
-        let foundProjectId = null;
-        
-        allProjectsSnapshot.forEach(doc => {
-            const data = doc.data();
-            if (data.artistName && data.projectName) {
-                if (data.artistName.toLowerCase() === decodedArtistName && 
-                    data.projectName.toLowerCase() === decodedProjectName) {
-                    foundProject = data;
-                    foundProjectId = doc.id;
-                }
-            }
-        });
-        
-        if (!foundProject) {
-            console.log('❌ Project not found');
-            return res.status(404).json({ 
-                error: 'Project not found' 
-            });
-        }
-        
-        console.log('✅ Project found:', foundProject.projectName);
-        
-        res.json({
-            success: true,
-            project: {
-                id: foundProjectId,
-                ...foundProject
-            }
-        });
-        
-    } catch (error) {
-        console.error('❌ Error fetching project:', error);
-        res.status(500).json({ 
-            error: 'Failed to fetch project',
-            details: error.message
-        });
-    }
+	try {
+		const { artistName, projectName } = req.params;
+
+		// Decode URL-encoded names
+		const decodedArtistName = decodeURIComponent(artistName).toLowerCase();
+		const decodedProjectName = decodeURIComponent(projectName).toLowerCase();
+
+		console.log(`🔍 Fetching project: ${decodedArtistName}/${decodedProjectName}`);
+
+		// Get all projects and filter in memory (case-insensitive)
+		const allProjectsSnapshot = await db.collection('artist_projects').get();
+
+		let foundProject = null;
+		let foundProjectId = null;
+
+		allProjectsSnapshot.forEach(doc => {
+			const data = doc.data();
+			if (data.artistName && data.projectName) {
+				if (data.artistName.toLowerCase() === decodedArtistName &&
+					data.projectName.toLowerCase() === decodedProjectName) {
+					foundProject = data;
+					foundProjectId = doc.id;
+				}
+			}
+		});
+
+		if (!foundProject) {
+			console.log('❌ Project not found');
+			return res.status(404).json({
+				error: 'Project not found'
+			});
+		}
+
+		console.log('✅ Project found:', foundProject.projectName);
+
+		res.json({
+			success: true,
+			project: {
+				id: foundProjectId,
+				...foundProject
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching project:', error);
+		res.status(500).json({
+			error: 'Failed to fetch project',
+			details: error.message
+		});
+	}
 });
 
 // Get all projects by artist name
 app.get('/api/public/artists/:artistName/projects', cors(corsOptions), async (req, res) => {
-    try {
-        const { artistName } = req.params;
-        
-        console.log(`🔍 Fetching projects for artist: ${artistName}`);
-        
-        const projectsSnapshot = await db.collection('artist_projects')
-            .where('artistName', '==', artistName)
-            .where('status', '==', 'approved')
-            .get();
-        
-        const projects = [];
-        projectsSnapshot.forEach(doc => {
-            projects.push({
-                id: doc.id,
-                ...doc.data()
-            });
-        });
-        
-        // Sort by creation date
-        projects.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        
-        res.json({
-            success: true,
-            projects: projects
-        });
-        
-    } catch (error) {
-        console.error('❌ Error fetching artist projects:', error);
-        res.status(500).json({ 
-            error: 'Failed to fetch projects',
-            details: error.message
-        });
-    }
+	try {
+		const { artistName } = req.params;
+
+		console.log(`🔍 Fetching projects for artist: ${artistName}`);
+
+		const projectsSnapshot = await db.collection('artist_projects')
+			.where('artistName', '==', artistName)
+			.where('status', '==', 'approved')
+			.get();
+
+		const projects = [];
+		projectsSnapshot.forEach(doc => {
+			projects.push({
+				id: doc.id,
+				...doc.data()
+			});
+		});
+
+		// Sort by creation date
+		projects.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+		res.json({
+			success: true,
+			projects: projects
+		});
+
+	} catch (error) {
+		console.error('❌ Error fetching artist projects:', error);
+		res.status(500).json({
+			error: 'Failed to fetch projects',
+			details: error.message
+		});
+	}
 });
 // ============================================
 // FIXED PUBLIC PROJECT PAGE ENDPOINTS
 // ============================================
 
 app.post('/api/artists/verify-ownership', cors(corsOptions), async (req, res) => {
-    try {
-        const { artistId, projectName } = req.body;
+	try {
+		const { artistId, projectName } = req.body;
 
-        if (!artistId || !projectName) {
-            return res.status(400).json({
-                error: 'Artist ID and project name are required'
-            });
-        }
+		if (!artistId || !projectName) {
+			return res.status(400).json({
+				error: 'Artist ID and project name are required'
+			});
+		}
 
-        console.log(`🔍 Verifying ownership for artist ${artistId} and project ${projectName}`);
+		console.log(`🔍 Verifying ownership for artist ${artistId} and project ${projectName}`);
 
-        // Get artist data
-        const artistDoc = await db.collection('artists').doc(artistId).get();
-        
-        if (!artistDoc.exists) {
-            return res.status(404).json({
-                error: 'Artist not found',
-                isOwner: false
-            });
-        }
+		// Get artist data
+		const artistDoc = await db.collection('artists').doc(artistId).get();
 
-        const artistData = artistDoc.data();
+		if (!artistDoc.exists) {
+			return res.status(404).json({
+				error: 'Artist not found',
+				isOwner: false
+			});
+		}
 
-        // Find project by artistId and projectName (case-insensitive)
-        const allProjectsSnapshot = await db.collection('artist_projects')
-            .where('artistId', '==', artistId)
-            .get();
+		const artistData = artistDoc.data();
 
-        let foundProject = null;
-        let foundProjectId = null;
+		// Find project by artistId and projectName (case-insensitive)
+		const allProjectsSnapshot = await db.collection('artist_projects')
+			.where('artistId', '==', artistId)
+			.get();
 
-        allProjectsSnapshot.forEach(doc => {
-            const data = doc.data();
-            if (data.projectName && 
-                data.projectName.toLowerCase() === projectName.toLowerCase()) {
-                foundProject = data;
-                foundProjectId = doc.id;
-            }
-        });
+		let foundProject = null;
+		let foundProjectId = null;
 
-        if (!foundProject) {
-            return res.json({
-                isOwner: false,
-                message: 'Project not found'
-            });
-        }
+		allProjectsSnapshot.forEach(doc => {
+			const data = doc.data();
+			if (data.projectName &&
+				data.projectName.toLowerCase() === projectName.toLowerCase()) {
+				foundProject = data;
+				foundProjectId = doc.id;
+			}
+		});
 
-        // Check if the artistId matches
-        const isOwner = foundProject.artistId === artistId;
+		if (!foundProject) {
+			return res.json({
+				isOwner: false,
+				message: 'Project not found'
+			});
+		}
 
-        console.log(`✅ Ownership verified: ${isOwner}`);
+		// Check if the artistId matches
+		const isOwner = foundProject.artistId === artistId;
 
-        res.json({
-            isOwner: isOwner,
-            projectId: foundProjectId,
-            project: {
-                ...foundProject,
-                id: foundProjectId
-            }
-        });
+		console.log(`✅ Ownership verified: ${isOwner}`);
 
-    } catch (error) {
-        console.error('❌ Error verifying ownership:', error);
-        res.status(500).json({
-            error: 'Failed to verify ownership',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-    }
+		res.json({
+			isOwner: isOwner,
+			projectId: foundProjectId,
+			project: {
+				...foundProject,
+				id: foundProjectId
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error verifying ownership:', error);
+		res.status(500).json({
+			error: 'Failed to verify ownership',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
 });
 
 app.put('/api/artists/projects/:projectId/details', cors(corsOptions), async (req, res) => {
-    try {
-        const { projectId } = req.params;
-        const { artistId, description, coverImage, backgroundColor } = req.body;
+	try {
+		const { projectId } = req.params;
+		const { artistId, description, coverImage, backgroundColor } = req.body;
 
-        console.log(`🔧 Updating project details for: ${projectId}`);
+		console.log(`🔧 Updating project details for: ${projectId}`);
 
-        // Get project
-        const projectDoc = await db.collection('artist_projects').doc(projectId).get();
-        
-        if (!projectDoc.exists) {
-            return res.status(404).json({ error: 'Project not found' });
-        }
+		// Get project
+		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
 
-        const projectData = projectDoc.data();
+		if (!projectDoc.exists) {
+			return res.status(404).json({ error: 'Project not found' });
+		}
 
-        // Verify artist owns this project
-        if (projectData.artistId !== artistId) {
-            return res.status(403).json({ 
-                error: 'Access denied. You do not own this project.' 
-            });
-        }
+		const projectData = projectDoc.data();
 
-        // Prepare update data
-        const updateData = {
-            updatedAt: new Date().toISOString()
-        };
+		// Verify artist owns this project
+		if (projectData.artistId !== artistId) {
+			return res.status(403).json({
+				error: 'Access denied. You do not own this project.'
+			});
+		}
 
-        // Update description if provided
-        if (description !== undefined) {
-            updateData.description = description.trim();
-        }
+		// Prepare update data
+		const updateData = {
+			updatedAt: new Date().toISOString()
+		};
 
-        // Update background color if provided
-        if (backgroundColor !== undefined && backgroundColor.trim()) {
-            updateData.backgroundColor = backgroundColor.trim();
-            console.log('✅ Background color updated:', backgroundColor.trim());
-        }
+		// Update description if provided
+		if (description !== undefined) {
+			updateData.description = description.trim();
+		}
 
-        // Handle cover image upload to IPFS if provided
-        if (coverImage) {
-            try {
-                console.log('📸 Processing cover image...');
+		// Update background color if provided
+		if (backgroundColor !== undefined && backgroundColor.trim()) {
+			updateData.backgroundColor = backgroundColor.trim();
+			console.log('✅ Background color updated:', backgroundColor.trim());
+		}
 
-                const base64Data = coverImage.replace(/^data:image\/[a-z]+;base64,/, '');
-                let imageBuffer = Buffer.from(base64Data, 'base64');
+		// Handle cover image upload to IPFS if provided
+		if (coverImage) {
+			try {
+				console.log('📸 Processing cover image...');
 
-                if (imageBuffer.length > 1 * 1024 * 1024) {
-                    return res.status(400).json({
-                        error: 'Cover image size must be less than 1MB'
-                    });
-                }
+				const base64Data = coverImage.replace(/^data:image\/[a-z]+;base64,/, '');
+				let imageBuffer = Buffer.from(base64Data, 'base64');
 
-                if (imageBuffer.length > 500 * 1024) {
-                    console.log('🔄 Compressing cover image...');
-                    imageBuffer = await compressImage(imageBuffer);
-                    console.log(`✅ Image compressed to ${(imageBuffer.length / 1024).toFixed(2)}KB`);
-                }
+				if (imageBuffer.length > 1 * 1024 * 1024) {
+					return res.status(400).json({
+						error: 'Cover image size must be less than 1MB'
+					});
+				}
 
-                const fileName = `project_cover_${artistId}_${Date.now()}.jpg`;
-                const coverIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName, 3);
+				if (imageBuffer.length > 500 * 1024) {
+					console.log('🔄 Compressing cover image...');
+					imageBuffer = await compressImage(imageBuffer);
+					console.log(`✅ Image compressed to ${(imageBuffer.length / 1024).toFixed(2)}KB`);
+				}
 
-                updateData.coverImageIpfsUrl = coverIpfsData.ipfsUrl;
-                updateData.coverImageIpfsHash = coverIpfsData.ipfsHash;
+				const fileName = `project_cover_${artistId}_${Date.now()}.jpg`;
+				const coverIpfsData = await uploadToIPFSFromBuffer(imageBuffer, fileName, 3);
 
-                console.log('✅ Cover image uploaded to IPFS:', coverIpfsData.ipfsUrl);
-            } catch (ipfsError) {
-                console.error('❌ IPFS upload failed:', ipfsError);
-                return res.status(500).json({
-                    error: 'Failed to upload cover image. Please try again with a smaller image.'
-                });
-            }
-        }
+				updateData.coverImageIpfsUrl = coverIpfsData.ipfsUrl;
+				updateData.coverImageIpfsHash = coverIpfsData.ipfsHash;
 
-        // Update in database
-        await db.collection('artist_projects').doc(projectId).update(updateData);
+				console.log('✅ Cover image uploaded to IPFS:', coverIpfsData.ipfsUrl);
+			} catch (ipfsError) {
+				console.error('❌ IPFS upload failed:', ipfsError);
+				return res.status(500).json({
+					error: 'Failed to upload cover image. Please try again with a smaller image.'
+				});
+			}
+		}
 
-        console.log(`✅ Project details updated successfully for: ${projectData.projectName}`);
+		// Update in database
+		await db.collection('artist_projects').doc(projectId).update(updateData);
 
-        res.json({
-            success: true,
-            message: 'Project details updated successfully',
-            project: {
-                id: projectId,
-                ...projectData,
-                ...updateData
-            }
-        });
+		console.log(`✅ Project details updated successfully for: ${projectData.projectName}`);
 
-    } catch (error) {
-        console.error('❌ Error updating project details:', error);
-        res.status(500).json({
-            error: 'Failed to update project details',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-    }
+		res.json({
+			success: true,
+			message: 'Project details updated successfully',
+			project: {
+				id: projectId,
+				...projectData,
+				...updateData
+			}
+		});
+
+	} catch (error) {
+		console.error('❌ Error updating project details:', error);
+		res.status(500).json({
+			error: 'Failed to update project details',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
 });
 
 // Get single project by ID - FIXED
 app.get('/api/public/projects/:projectId', cors(corsOptions), async (req, res) => {
 	try {
 		const { projectId } = req.params;
-		
+
 		console.log(`🌐 Fetching public project: ${projectId}`);
-		
+
 		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
-		
+
 		if (!projectDoc.exists) {
 			console.log('❌ Project not found:', projectId);
-			return res.status(404).json({ 
-				error: 'Project not found' 
+			return res.status(404).json({
+				error: 'Project not found'
 			});
 		}
-		
+
 		const projectData = projectDoc.data();
 		console.log('✅ Project found:', projectData.projectName);
-		
+
 		res.json({
 			success: true,
 			project: {
@@ -6819,10 +6819,10 @@ app.get('/api/public/projects/:projectId', cors(corsOptions), async (req, res) =
 				rejectionReason: projectData.rejectionReason || null
 			}
 		});
-		
+
 	} catch (error) {
 		console.error('❌ Error fetching public project:', error);
-		res.status(500).json({ 
+		res.status(500).json({
 			error: 'Failed to fetch project',
 			details: error.message
 		});
@@ -6833,14 +6833,14 @@ app.get('/api/public/projects/:projectId', cors(corsOptions), async (req, res) =
 app.get('/api/public/projects', cors(corsOptions), async (req, res) => {
 	try {
 		const { limit = 20, page = 1 } = req.query;
-		
+
 		console.log('🌐 Fetching all projects from artist_projects collection');
-		
+
 		// FIXED: Get ALL documents first, then filter in memory
 		const snapshot = await db.collection('artist_projects').get();
-		
+
 		console.log(`📊 Found ${snapshot.size} total documents`);
-		
+
 		const allProjects = [];
 		snapshot.forEach(doc => {
 			const data = doc.data();
@@ -6859,26 +6859,26 @@ app.get('/api/public/projects', cors(corsOptions), async (req, res) => {
 				createdAt: data.createdAt
 			});
 		});
-		
+
 		// Filter approved projects in memory
 		const approvedProjects = allProjects.filter(p => p.status === 'approved');
-		
+
 		console.log(`✅ Found ${approvedProjects.length} approved projects out of ${allProjects.length} total`);
-		
+
 		// Sort by creation date (newest first)
 		approvedProjects.sort((a, b) => {
 			const dateA = new Date(a.createdAt || 0);
 			const dateB = new Date(b.createdAt || 0);
 			return dateB - dateA;
 		});
-		
+
 		// Pagination
 		const limitNum = parseInt(limit);
 		const pageNum = parseInt(page);
 		const startIndex = (pageNum - 1) * limitNum;
 		const endIndex = startIndex + limitNum;
 		const paginatedProjects = approvedProjects.slice(startIndex, endIndex);
-		
+
 		res.json({
 			success: true,
 			projects: paginatedProjects,
@@ -6889,12 +6889,12 @@ app.get('/api/public/projects', cors(corsOptions), async (req, res) => {
 				totalPages: Math.ceil(approvedProjects.length / limitNum)
 			}
 		});
-		
+
 	} catch (error) {
 		console.error('❌ Error fetching public projects:', error);
 		console.error('Error details:', error.message);
 		console.error('Error stack:', error.stack);
-		res.status(500).json({ 
+		res.status(500).json({
 			error: 'Failed to fetch projects',
 			details: error.message
 		});
@@ -6911,30 +6911,30 @@ app.put('/api/admin/artist-projects/:projectId/contract', cors(corsOptions), asy
 	try {
 		const { projectId } = req.params;
 		const { contractAddress, networkId, mintingEnabled } = req.body;
-		
+
 		console.log(`🔧 Approving and updating contract for project: ${projectId}`);
 		console.log('Contract data:', { contractAddress, networkId, mintingEnabled });
-		
+
 		// Validate contract address format
 		if (contractAddress && !/^0x[a-fA-F0-9]{40}$/.test(contractAddress)) {
-			return res.status(400).json({ 
-				error: 'Invalid contract address format. Must be 0x followed by 40 hex characters.' 
+			return res.status(400).json({
+				error: 'Invalid contract address format. Must be 0x followed by 40 hex characters.'
 			});
 		}
-		
+
 		// Get project
 		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
-		
+
 		if (!projectDoc.exists) {
-			return res.status(404).json({ 
-				error: 'Project not found' 
+			return res.status(404).json({
+				error: 'Project not found'
 			});
 		}
-		
+
 		const projectData = projectDoc.data();
-		
+
 		// REMOVED: Status check - we now approve AND add contract at the same time
-		
+
 		// Prepare update data - APPROVE + ADD CONTRACT
 		const updateData = {
 			status: 'approved', // ✅ APPROVE THE PROJECT
@@ -6945,12 +6945,12 @@ app.put('/api/admin/artist-projects/:projectId/contract', cors(corsOptions), asy
 			reviewedAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString()
 		};
-		
+
 		// Update in database
 		await db.collection('artist_projects').doc(projectId).update(updateData);
-		
+
 		console.log(`✅ Project APPROVED and contract added successfully for: ${projectData.projectName}`);
-		
+
 		res.json({
 			success: true,
 			message: 'Project approved and contract details added successfully',
@@ -6960,10 +6960,10 @@ app.put('/api/admin/artist-projects/:projectId/contract', cors(corsOptions), asy
 				...updateData
 			}
 		});
-		
+
 	} catch (error) {
 		console.error('❌ Error approving and updating contract:', error);
-		res.status(500).json({ 
+		res.status(500).json({
 			error: 'Failed to approve project and update contract details',
 			details: error.message
 		});
@@ -6975,44 +6975,44 @@ app.patch('/api/admin/artist-projects/:projectId/toggle-minting', cors(corsOptio
 	try {
 		const { projectId } = req.params;
 		const { mintingEnabled } = req.body;
-		
+
 		console.log(`🎯 Toggling minting for project: ${projectId} to ${mintingEnabled}`);
-		
+
 		const projectDoc = await db.collection('artist_projects').doc(projectId).get();
-		
+
 		if (!projectDoc.exists) {
-			return res.status(404).json({ 
-				error: 'Project not found' 
+			return res.status(404).json({
+				error: 'Project not found'
 			});
 		}
-		
+
 		const projectData = projectDoc.data();
-		
+
 		// Validate project has contract
 		if (!projectData.contractAddress) {
-			return res.status(400).json({ 
-				error: 'Cannot enable minting without contract address. Please add contract details first.' 
+			return res.status(400).json({
+				error: 'Cannot enable minting without contract address. Please add contract details first.'
 			});
 		}
-		
+
 		// Update minting status
 		await db.collection('artist_projects').doc(projectId).update({
 			mintingEnabled: mintingEnabled,
 			mintingToggledAt: new Date().toISOString(),
 			updatedAt: new Date().toISOString()
 		});
-		
+
 		console.log(`✅ Minting ${mintingEnabled ? 'enabled' : 'disabled'} for: ${projectData.projectName}`);
-		
+
 		res.json({
 			success: true,
 			message: `Minting ${mintingEnabled ? 'enabled' : 'disabled'} successfully`,
 			mintingEnabled: mintingEnabled
 		});
-		
+
 	} catch (error) {
 		console.error('❌ Error toggling minting:', error);
-		res.status(500).json({ 
+		res.status(500).json({
 			error: 'Failed to toggle minting status',
 			details: error.message
 		});
@@ -7023,9 +7023,9 @@ app.patch('/api/admin/artist-projects/:projectId/toggle-minting', cors(corsOptio
 app.get('/api/debug/artist-projects', cors(corsOptions), async (req, res) => {
 	try {
 		console.log('🔍 DEBUG: Testing artist_projects collection');
-		
+
 		const snapshot = await db.collection('artist_projects').get();
-		
+
 		const projects = [];
 		snapshot.forEach(doc => {
 			projects.push({
@@ -7033,18 +7033,18 @@ app.get('/api/debug/artist-projects', cors(corsOptions), async (req, res) => {
 				data: doc.data()
 			});
 		});
-		
+
 		console.log(`✅ DEBUG: Found ${projects.length} projects`);
-		
+
 		res.json({
 			success: true,
 			count: projects.length,
 			projects: projects
 		});
-		
+
 	} catch (error) {
 		console.error('❌ DEBUG ERROR:', error);
-		res.status(500).json({ 
+		res.status(500).json({
 			error: 'Debug failed',
 			details: error.message
 		});
@@ -7053,81 +7053,81 @@ app.get('/api/debug/artist-projects', cors(corsOptions), async (req, res) => {
 
 // Add this endpoint for real-time project name checking
 app.post('/api/artists/check-project-name', cors(corsOptions), async (req, res) => {
-    try {
-        const { projectName, artistId } = req.body;
+	try {
+		const { projectName, artistId } = req.body;
 
-        if (!projectName || !projectName.trim()) {
-            return res.status(400).json({
-                error: 'Project name is required'
-            });
-        }
+		if (!projectName || !projectName.trim()) {
+			return res.status(400).json({
+				error: 'Project name is required'
+			});
+		}
 
-        if (!artistId) {
-            return res.status(400).json({
-                error: 'Artist ID is required'
-            });
-        }
+		if (!artistId) {
+			return res.status(400).json({
+				error: 'Artist ID is required'
+			});
+		}
 
-        // Check if project name already exists
-        const existingProject = await db.collection('artist_projects')
-            .where('projectName', '==', projectName.trim())
-            .limit(1)
-            .get();
+		// Check if project name already exists
+		const existingProject = await db.collection('artist_projects')
+			.where('projectName', '==', projectName.trim())
+			.limit(1)
+			.get();
 
-        res.json({
-            available: existingProject.empty,
-            projectName: projectName.trim()
-        });
+		res.json({
+			available: existingProject.empty,
+			projectName: projectName.trim()
+		});
 
-    } catch (error) {
-        console.error('❌ Error checking project name:', error);
-        res.status(500).json({
-            error: 'Failed to check project name availability'
-        });
-    }
+	} catch (error) {
+		console.error('❌ Error checking project name:', error);
+		res.status(500).json({
+			error: 'Failed to check project name availability'
+		});
+	}
 });
 
 // Add this endpoint for real-time project symbol availability checking
 app.post('/api/artists/check-project-symbol', cors(corsOptions), async (req, res) => {
-    try {
-        const { projectSymbol, artistId } = req.body;
+	try {
+		const { projectSymbol, artistId } = req.body;
 
-        if (!projectSymbol || !projectSymbol.trim()) {
-            return res.status(400).json({
-                error: 'Project symbol is required'
-            });
-        }
+		if (!projectSymbol || !projectSymbol.trim()) {
+			return res.status(400).json({
+				error: 'Project symbol is required'
+			});
+		}
 
-        if (!artistId) {
-            return res.status(400).json({
-                error: 'Artist ID is required'
-            });
-        }
+		if (!artistId) {
+			return res.status(400).json({
+				error: 'Artist ID is required'
+			});
+		}
 
-        console.log('🔍 Checking project symbol availability:', projectSymbol.trim().toUpperCase());
+		console.log('🔍 Checking project symbol availability:', projectSymbol.trim().toUpperCase());
 
-        // Check if project symbol already exists
-        const existingProject = await db.collection('artist_projects')
-            .where('projectSymbol', '==', projectSymbol.trim().toUpperCase())
-            .limit(1)
-            .get();
+		// Check if project symbol already exists
+		const existingProject = await db.collection('artist_projects')
+			.where('projectSymbol', '==', projectSymbol.trim().toUpperCase())
+			.limit(1)
+			.get();
 
-        const available = existingProject.empty;
-        
-        console.log(`✅ Project symbol "${projectSymbol.trim().toUpperCase()}" is ${available ? 'available' : 'taken'}`);
+		const available = existingProject.empty;
 
-        res.json({
-            available: available,
-            projectSymbol: projectSymbol.trim().toUpperCase()
-        });
+		console.log(`✅ Project symbol "${projectSymbol.trim().toUpperCase()}" is ${available ? 'available' : 'taken'}`);
 
-    } catch (error) {
-        console.error('❌ Error checking project symbol:', error);
-        res.status(500).json({
-            error: 'Failed to check project symbol availability',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-    }
+		res.json({
+			available: available,
+			projectSymbol: projectSymbol.trim().toUpperCase()
+		});
+
+	} catch (error) {
+		console.error('❌ Error checking project symbol:', error);
+		res.status(500).json({
+			error: 'Failed to check project symbol availability',
+			details: process.env.NODE_ENV === 'development' ? error.message : undefined
+		});
+	}
 });
 
 /*ARTIST DAPP SERVER ENDS*/
