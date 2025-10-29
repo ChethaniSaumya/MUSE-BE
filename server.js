@@ -5808,115 +5808,213 @@ app.get('/api/admin/payout-limits', authenticateAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async (req, res) => {
-	try {
-		const { totalLimit, fromDate, toDate, projectName, comments } = req.body;
+    try {
+        const { totalLimit, fromDate, toDate, projectName, comments } = req.body;
 
-		// Validation
-		if (!totalLimit || totalLimit <= 0) {
-			return res.status(400).json({ error: 'Total limit must be greater than 0' });
-		}
+        // Validation
+        if (!totalLimit || totalLimit <= 0) {
+            return res.status(400).json({ error: 'Total limit must be greater than 0' });
+        }
 
-		if (totalLimit > 100000) {
-			return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
-		}
+        if (totalLimit > 100000) {
+            return res.status(400).json({ error: 'Total limit cannot exceed $100,000' });
+        }
 
-		// Validate dates if provided
-		if (fromDate && toDate) {
-			const from = new Date(fromDate);
-			const to = new Date(toDate);
+        // Validate dates if provided
+        if (fromDate && toDate) {
+            const from = new Date(fromDate);
+            const to = new Date(toDate);
 
-			if (from >= to) {
-				return res.status(400).json({ error: 'From date must be before To date' });
-			}
-		}
+            if (from >= to) {
+                return res.status(400).json({ error: 'From date must be before To date' });
+            }
+        }
 
-		const now = new Date();
-		const disbursementId = `disbursement_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        const now = new Date();
+        const disbursementId = `disbursement_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
-		// Get current data for audit log
-		const currentDoc = await db.collection('admin_settings').doc('payout_limits').get();
-		const oldLimit = currentDoc.exists ? currentDoc.data().totalLimit : null;
+        // Get current data for audit log
+        const currentDoc = await db.collection('admin_settings').doc('payout_limits').get();
+        const oldLimit = currentDoc.exists ? currentDoc.data().totalLimit : null;
 
-		// Mark previous disbursement as inactive
-		if (currentDoc.exists) {
-			const oldDisbursementId = currentDoc.data().disbursementId;
-			if (oldDisbursementId) {
-				try {
-					const historyQuery = await db.collection('disbursement_history')
-						.where('disbursementId', '==', oldDisbursementId)
-						.get();
+        // ============================================
+        // REMOVED: Don't automatically mark old disbursements as inactive!
+        // Disbursements should remain active until their end date
+        // ============================================
 
-					const batch = db.batch();
-					historyQuery.docs.forEach(doc => {
-						batch.update(doc.ref, { isActive: false });
-					});
-					await batch.commit();
-				} catch (historyError) {
-					console.error('Error updating previous disbursement history:', historyError);
-				}
-			}
-		}
+        // Set the new payout limit with disbursement ID
+        await db.collection('admin_settings').doc('payout_limits').set({
+            totalLimit: parseFloat(totalLimit),
+            usedAmount: 0, // Reset used amount for NEW disbursement tracking
+            lastReset: now,
+            updatedAt: now,
+            updatedBy: 'admin',
+            disbursementId: disbursementId, // Track this as the CURRENT disbursement for pool
+            fromDate: fromDate || null,
+            toDate: toDate || null,
+            period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+            projectName: projectName || null
+        });
 
-		// Set the new payout limit with disbursement ID
-		await db.collection('admin_settings').doc('payout_limits').set({
-			totalLimit: parseFloat(totalLimit),
-			usedAmount: 0, // Reset used amount when setting new limit
-			lastReset: now,
-			updatedAt: now,
-			updatedBy: 'admin',
-			disbursementId: disbursementId, // Track this disbursement
-			fromDate: fromDate || null,
-			toDate: toDate || null,
-			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
-			projectName: projectName || null
-		});
+        // Record this disbursement in history
+        await db.collection('disbursement_history').add({
+            disbursementId: disbursementId,
+            totalLimit: parseFloat(totalLimit),
+            fromDate: fromDate || null,
+            toDate: toDate || null,
+            period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+            projectName: projectName || null,
+            comments: comments || null,
+            usedAmount: 0,
+            isActive: true, // New disbursements start as active
+            createdAt: now.toISOString(),
+            createdBy: 'admin',
+            startDate: now.toISOString()
+        });
 
-		// Record this disbursement in history
-		await db.collection('disbursement_history').add({
-			disbursementId: disbursementId,
-			totalLimit: parseFloat(totalLimit),
-			fromDate: fromDate || null,
-			toDate: toDate || null,
-			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
-			projectName: projectName || null,
-			comments: comments || null,
-			usedAmount: 0,
-			isActive: true,
-			createdAt: now.toISOString(),
-			createdBy: 'admin',
-			startDate: now.toISOString()
-		});
+        // Log the change for audit trail
+        await db.collection('admin_audit_log').add({
+            action: 'payout_limit_updated',
+            oldLimit: oldLimit,
+            newLimit: parseFloat(totalLimit),
+            oldDisbursementId: currentDoc.exists ? currentDoc.data().disbursementId : null,
+            newDisbursementId: disbursementId,
+            fromDate: fromDate,
+            toDate: toDate,
+            period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
+            projectName: projectName,
+            timestamp: now,
+            adminId: 'admin',
+            ip: req.ip
+        });
 
-		// Log the change for audit trail
-		await db.collection('admin_audit_log').add({
-			action: 'payout_limit_updated',
-			oldLimit: oldLimit,
-			newLimit: parseFloat(totalLimit),
-			oldDisbursementId: currentDoc.exists ? currentDoc.data().disbursementId : null,
-			newDisbursementId: disbursementId,
-			fromDate: fromDate,
-			toDate: toDate,
-			period: (fromDate && toDate) ? `${fromDate} to ${toDate}` : 'Not specified',
-			projectName: projectName,
-			timestamp: now,
-			adminId: 'admin',
-			ip: req.ip
-		});
+        console.log(`✅ New disbursement created: ${disbursementId} with limit $${totalLimit}`);
 
-		console.log(`✅ New disbursement created: ${disbursementId} with limit $${totalLimit}`);
-
-		res.json({
-			success: true,
-			message: 'New disbursement created successfully',
-			disbursementId: disbursementId,
-			totalLimit: parseFloat(totalLimit),
-			remainingLimit: parseFloat(totalLimit)
-		});
-	} catch (error) {
-		console.error('Error setting payout limits:', error);
-		res.status(500).json({ error: 'Failed to set payout limits' });
-	}
+        res.json({
+            success: true,
+            message: 'New disbursement created successfully',
+            disbursementId: disbursementId,
+            totalLimit: parseFloat(totalLimit),
+            remainingLimit: parseFloat(totalLimit)
+        });
+    } catch (error) {
+        console.error('Error setting payout limits:', error);
+        res.status(500).json({ error: 'Failed to set payout limits' });
+    }
 });
+
+const markExpiredDisbursements = async () => {
+    try {
+        console.log('🔄 Checking for expired disbursements...');
+        
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+        
+        // Get all active disbursements
+        const activeQuery = await db.collection('disbursement_history')
+            .where('isActive', '==', true)
+            .get();
+        
+        if (activeQuery.empty) {
+            console.log('No active disbursements to check');
+            return;
+        }
+        
+        let expiredCount = 0;
+        const batch = db.batch();
+        
+        activeQuery.docs.forEach(doc => {
+            const disbursement = doc.data();
+            
+            // Check if disbursement has passed its end date
+            if (disbursement.toDate) {
+                const endDate = new Date(disbursement.toDate);
+                const endDateStr = endDate.toISOString().split('T')[0];
+                
+                // If today is AFTER the end date, mark as inactive
+                if (todayStr > endDateStr) {
+                    console.log(`⏰ Disbursement ${disbursement.disbursementId} expired on ${endDateStr}`);
+                    batch.update(doc.ref, { 
+                        isActive: false,
+                        expiredAt: now.toISOString()
+                    });
+                    expiredCount++;
+                }
+            }
+        });
+        
+        if (expiredCount > 0) {
+            await batch.commit();
+            console.log(`✅ Marked ${expiredCount} disbursement(s) as expired`);
+            
+            // Log the auto-expiration
+            await db.collection('admin_audit_log').add({
+                action: 'auto_expire_disbursements',
+                expiredCount: expiredCount,
+                timestamp: now.toISOString(),
+                automatedBy: 'system'
+            });
+        } else {
+            console.log('✅ No disbursements expired today');
+        }
+        
+    } catch (error) {
+        console.error('❌ Error marking expired disbursements:', error);
+    }
+};
+
+setInterval(markExpiredDisbursements, 24 * 60 * 60 * 1000);
+markExpiredDisbursements();
+
+app.post('/api/admin/disbursement/:disbursementId/mark-complete', cors(corsOptions), authenticateAdmin, async (req, res) => {
+    try {
+        const { disbursementId } = req.params;
+        const { reason } = req.body;
+        
+        // Find the disbursement
+        const disbursementQuery = await db.collection('disbursement_history')
+            .where('disbursementId', '==', disbursementId)
+            .limit(1)
+            .get();
+        
+        if (disbursementQuery.empty) {
+            return res.status(404).json({ error: 'Disbursement not found' });
+        }
+        
+        const doc = disbursementQuery.docs[0];
+        const now = new Date();
+        
+        // Mark as inactive
+        await doc.ref.update({
+            isActive: false,
+            manuallyCompletedAt: now.toISOString(),
+            completionReason: reason || 'Manually marked complete by admin'
+        });
+        
+        // Log the manual completion
+        await db.collection('admin_audit_log').add({
+            action: 'manual_complete_disbursement',
+            disbursementId: disbursementId,
+            reason: reason || 'Manually marked complete',
+            timestamp: now.toISOString(),
+            adminId: 'admin',
+            ip: req.ip
+        });
+        
+        console.log(`✅ Disbursement ${disbursementId} manually marked complete`);
+        
+        res.json({
+            success: true,
+            message: 'Disbursement marked as complete',
+            disbursementId: disbursementId
+        });
+        
+    } catch (error) {
+        console.error('Error marking disbursement complete:', error);
+        res.status(500).json({ error: 'Failed to mark disbursement complete' });
+    }
+});
+
 
 app.get('/api/admin/user-withdrawal-breakdown/:walletAddress', cors(corsOptions), authenticateAdmin, async (req, res) => {
 	try {
