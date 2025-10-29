@@ -4556,6 +4556,105 @@ app.post('/api/admin/fix-disbursement-ids', cors(corsOptions), authenticateAdmin
     }
 });
 
+// COMPLETE SYSTEM RESET
+app.post('/api/admin/complete-reset', cors(corsOptions), authenticateAdmin, async (req, res) => {
+    try {
+        const { confirmationCode } = req.body;
+        
+        // Safety check - require confirmation code
+        if (confirmationCode !== 'RESET_EVERYTHING_NOW') {
+            return res.status(400).json({
+                error: 'Invalid confirmation code. To confirm complete reset, send: {"confirmationCode": "RESET_EVERYTHING_NOW"}'
+            });
+        }
+        
+        console.log('🚨 STARTING COMPLETE SYSTEM RESET...');
+        
+        let results = {
+            disbursementsDeleted: 0,
+            usersReset: 0,
+            adminSettingsReset: false,
+            errors: []
+        };
+        
+        // STEP 1: Delete ALL disbursement history
+        try {
+            const disbursementQuery = await db.collection('disbursement_history').get();
+            
+            if (!disbursementQuery.empty) {
+                const batch = db.batch();
+                disbursementQuery.docs.forEach(doc => {
+                    batch.delete(doc.ref);
+                });
+                await batch.commit();
+                results.disbursementsDeleted = disbursementQuery.size;
+                console.log(`✅ Deleted ${disbursementQuery.size} disbursements`);
+            }
+        } catch (error) {
+            console.error('Error deleting disbursements:', error);
+            results.errors.push('Failed to delete disbursements: ' + error.message);
+        }
+        
+        // STEP 2: Clear ALL withdrawal history from paypal collection
+        try {
+            const paypalQuery = await db.collection('paypal').get();
+            
+            if (!paypalQuery.empty) {
+                const batch = db.batch();
+                paypalQuery.docs.forEach(doc => {
+                    // Keep paypalEmail and walletAddress, but clear payouts
+                    batch.update(doc.ref, {
+                        payouts: [],
+                        lastPayoutAt: null,
+                        lastStatusCheck: null,
+                        updatedAt: new Date().toISOString()
+                    });
+                });
+                await batch.commit();
+                results.usersReset = paypalQuery.size;
+                console.log(`✅ Reset ${paypalQuery.size} user payout histories`);
+            }
+        } catch (error) {
+            console.error('Error resetting user payouts:', error);
+            results.errors.push('Failed to reset user payouts: ' + error.message);
+        }
+        
+        // STEP 3: Reset admin payout limits
+        try {
+            await db.collection('admin_settings').doc('payout_limits').delete();
+            results.adminSettingsReset = true;
+            console.log('✅ Reset admin payout limits');
+        } catch (error) {
+            console.error('Error resetting admin settings:', error);
+            results.errors.push('Failed to reset admin settings: ' + error.message);
+        }
+        
+        // STEP 4: Create audit log
+        await db.collection('admin_audit_log').add({
+            action: 'complete_system_reset',
+            timestamp: new Date().toISOString(),
+            adminId: 'admin',
+            results: results,
+            ip: req.ip
+        });
+        
+        console.log('✅ COMPLETE RESET FINISHED');
+        
+        res.json({
+            success: true,
+            message: 'Complete system reset successful. All users now start at $0.',
+            results: results
+        });
+        
+    } catch (error) {
+        console.error('❌ Complete reset failed:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Complete reset failed',
+            details: error.message
+        });
+    }
+});
 
 // Get current payout limits
 app.get('/api/admin/payout-limits', cors(corsOptions), async (req, res) => {
