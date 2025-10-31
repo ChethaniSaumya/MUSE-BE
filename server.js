@@ -4321,7 +4321,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			sender_batch_header: {
 				sender_batch_id: payoutId,
 				email_subject: "Withdrawal from Hope KK NFTs",
-				email_message: "You have received a withdrawal from your Hope KK NFT cumulative balance."
+				email_message: "You have successfully received a withdrawal from your Hope KK NFT."
 			},
 			items: [{
 				recipient_type: "EMAIL",
@@ -4330,8 +4330,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 					currency: "USD"
 				},
 				receiver: paypalData.paypalEmail,
-				note: `Hope KK NFT Cumulative Balance - ${userData.totalMinted} NFTs out of ${payoutCalculation.totalSupply} total`,
-				sender_item_id: payoutId
+ 				sender_item_id: payoutId
 			}]
 		});
 
