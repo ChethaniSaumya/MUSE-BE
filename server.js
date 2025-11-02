@@ -3626,35 +3626,42 @@ const getUserPayoutHistory = async (email) => {
 
 // Get user's payout information
 app.get('/api/users/:email/payout-info', cors(corsOptions), async (req, res) => {
-	try {
-		const email = req.params.email;
-		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    try {
+        const email = req.params.email;
+        const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
-		// Get user data
-		const userDoc = await db.collection('users').doc(docId).get();
-		if (!userDoc.exists) {
-			return res.status(404).json({ error: 'User not found' });
-		}
+        // Get user data
+        const userDoc = await db.collection('users').doc(docId).get();
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: 'User not found' });
+        }
 
-		const userData = userDoc.data();
+        const userData = userDoc.data();
 
-		// Calculate payout eligibility
-		const payoutInfo = await calculateUserPayout(userData);
+        // ✅ Calculate payout eligibility using UPDATED function
+        const payoutInfo = await calculateUserPayout(userData);
 
-		// Get payout history
-		const payoutHistory = await getUserPayoutHistory(email);
+        console.log('💰 Calculated payout info for', email, ':', {
+            availableAmount: payoutInfo.availableAmount,
+            totalEligible: payoutInfo.totalEligible,
+            totalWithdrawn: payoutInfo.totalWithdrawn,
+            activeDisbursements: payoutInfo.totalActiveDisbursements
+        });
 
-		res.json({
-			success: true,
-			payoutInfo: payoutInfo,
-			payoutHistory: payoutHistory,
-			hasPayPalEmail: !!userData.paypalEmail
-		});
+        // Get payout history
+        const payoutHistory = await getUserPayoutHistory(email);
 
-	} catch (error) {
-		console.error('Error fetching payout info:', error);
-		res.status(500).json({ error: 'Internal server error' });
-	}
+        res.json({
+            success: true,
+            payoutInfo: payoutInfo,  // ✅ This should contain availableAmount from ACTIVE disbursements
+            payoutHistory: payoutHistory,
+            hasPayPalEmail: !!userData.paypalEmail
+        });
+
+    } catch (error) {
+        console.error('Error fetching payout info:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // MAKE SURE you have this endpoint in your server.js
