@@ -18,6 +18,7 @@ const payoutsSDK = require('@paypal/payouts-sdk')
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const sharp = require('sharp');
+const cron = require('node-cron');
 
 const Environment = process.env.NODE_ENV === 'production'
 	? paypal.core.LiveEnvironment
@@ -5932,68 +5933,138 @@ app.post('/api/admin/payout-limits', cors(corsOptions), authenticateAdmin, async
 	}
 });
 
+// ============================================
+// AUTOMATIC DISBURSEMENT EXPIRATION - RUNS DAILY AT 00:00 UTC
+// ============================================
+
 const markExpiredDisbursements = async () => {
-	try {
-		console.log('🔄 Checking for expired disbursements...');
+    try {
+        console.log('🔄 [CRON] Checking for expired disbursements...');
+        console.log('🕐 Current UTC time:', new Date().toISOString());
 
-		const now = new Date();
-		const todayStr = now.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0]; // Format: YYYY-MM-DD
 
-		// Get all active disbursements
-		const activeQuery = await db.collection('disbursement_history')
-			.where('isActive', '==', true)
-			.get();
+        // Get all active disbursements
+        const activeQuery = await db.collection('disbursement_history')
+            .where('isActive', '==', true)
+            .get();
 
-		if (activeQuery.empty) {
-			console.log('No active disbursements to check');
-			return;
-		}
+        if (activeQuery.empty) {
+            console.log('✅ [CRON] No active disbursements to check');
+            return { 
+                success: true, 
+                message: 'No active disbursements',
+                expiredCount: 0 
+            };
+        }
 
-		let expiredCount = 0;
-		const batch = db.batch();
+        let expiredCount = 0;
+        const batch = db.batch();
+        const expiredDisbursements = [];
 
-		activeQuery.docs.forEach(doc => {
-			const disbursement = doc.data();
+        activeQuery.docs.forEach(doc => {
+            const disbursement = doc.data();
 
-			// Check if disbursement has passed its end date
-			if (disbursement.toDate) {
-				const endDate = new Date(disbursement.toDate);
-				const endDateStr = endDate.toISOString().split('T')[0];
+            // Check if disbursement has passed its end date
+            if (disbursement.toDate) {
+                const endDate = new Date(disbursement.toDate);
+                const endDateStr = endDate.toISOString().split('T')[0];
 
-				// If today is AFTER the end date, mark as inactive
-				if (todayStr > endDateStr) {
-					console.log(`⏰ Disbursement ${disbursement.disbursementId} expired on ${endDateStr}`);
-					batch.update(doc.ref, {
-						isActive: false,
-						expiredAt: now.toISOString()
-					});
-					expiredCount++;
-				}
-			}
-		});
+                // If today is AFTER the end date, mark as inactive
+                if (todayStr > endDateStr) {
+                    console.log(`⏰ [CRON] Disbursement ${disbursement.disbursementId} expired on ${endDateStr}`);
+                    
+                    batch.update(doc.ref, {
+                        isActive: false,
+                        expiredAt: now.toISOString(),
+                        expiredBy: 'automated-cron-job'
+                    });
+                    
+                    expiredDisbursements.push({
+                        id: disbursement.disbursementId,
+                        period: disbursement.period,
+                        endDate: endDateStr,
+                        totalLimit: disbursement.totalLimit
+                    });
+                    
+                    expiredCount++;
+                }
+            }
+        });
 
-		if (expiredCount > 0) {
-			await batch.commit();
-			console.log(`✅ Marked ${expiredCount} disbursement(s) as expired`);
+        if (expiredCount > 0) {
+            await batch.commit();
+            console.log(`✅ [CRON] Marked ${expiredCount} disbursement(s) as expired`);
 
-			// Log the auto-expiration
-			await db.collection('admin_audit_log').add({
-				action: 'auto_expire_disbursements',
-				expiredCount: expiredCount,
-				timestamp: now.toISOString(),
-				automatedBy: 'system'
-			});
-		} else {
-			console.log('✅ No disbursements expired today');
-		}
+            // Log the auto-expiration with details
+            await db.collection('admin_audit_log').add({
+                action: 'auto_expire_disbursements',
+                expiredCount: expiredCount,
+                expiredDisbursements: expiredDisbursements,
+                timestamp: now.toISOString(),
+                automatedBy: 'cron-job-daily-00-00-utc',
+                serverTime: now.toISOString(),
+                timezone: 'UTC'
+            });
 
-	} catch (error) {
-		console.error('❌ Error marking expired disbursements:', error);
-	}
+            console.log('📋 [CRON] Expired disbursements:', expiredDisbursements);
+        } else {
+            console.log('✅ [CRON] No disbursements expired today');
+        }
+
+        return {
+            success: true,
+            expiredCount: expiredCount,
+            expiredDisbursements: expiredDisbursements,
+            checkedAt: now.toISOString()
+        };
+
+    } catch (error) {
+        console.error('❌ [CRON] Error marking expired disbursements:', error);
+        
+        // Log the error
+        try {
+            await db.collection('admin_audit_log').add({
+                action: 'auto_expire_disbursements_error',
+                error: error.message,
+                stack: error.stack,
+                timestamp: new Date().toISOString(),
+                automatedBy: 'cron-job-daily-00-00-utc'
+            });
+        } catch (logError) {
+            console.error('❌ [CRON] Failed to log error:', logError);
+        }
+
+        return {
+            success: false,
+            error: error.message
+        };
+    }
 };
 
-setInterval(markExpiredDisbursements, 24 * 60 * 60 * 1000);
-markExpiredDisbursements();
+// ============================================
+// CRON JOB SETUP - RUNS EVERY DAY AT 00:00 UTC
+// ============================================
+
+// Schedule the cron job to run at 00:00 UTC every day
+cron.schedule('0 0 * * *', async () => {
+    console.log('🚀 [CRON] Daily disbursement expiration job triggered at 00:00 UTC');
+    await markExpiredDisbursements();
+}, {
+    scheduled: true,
+    timezone: "UTC"
+});
+
+// Also run immediately when server starts (to catch any missed expirations)
+console.log('🚀 [STARTUP] Running initial disbursement expiration check...');
+markExpiredDisbursements().then(result => {
+    console.log('✅ [STARTUP] Initial expiration check completed:', result);
+}).catch(error => {
+    console.error('❌ [STARTUP] Initial expiration check failed:', error);
+});
+
+console.log('✅ [CRON] Disbursement expiration cron job scheduled for 00:00 UTC daily'); 
 
 app.post('/api/admin/disbursement/:disbursementId/mark-complete', cors(corsOptions), authenticateAdmin, async (req, res) => {
 	try {
