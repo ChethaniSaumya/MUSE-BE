@@ -3413,147 +3413,170 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 	}
 };
 
+// Replace your calculateUserPayout function with this fixed version:
 
 const calculateUserPayout = async (userData) => {
-	try {
-		console.log('🔍 Starting CUMULATIVE payout calculation for user:', userData?.email || 'unknown');
+    try {
+        console.log('🔍 Starting ACTIVE disbursements payout calculation for user:', userData?.email || 'unknown');
 
-		const userNFTsOwned = userData.totalMinted || 0;
-		console.log('📊 User NFTs owned:', userNFTsOwned);
+        const userNFTsOwned = userData.totalMinted || 0;
+        console.log('📊 User NFTs owned:', userNFTsOwned);
 
-		// Get total supply from contract
-		let totalSupply = 0;
-		try {
-			const contractTotalSupply = await nftContract.methods.totalSupply().call();
-			totalSupply = Number(contractTotalSupply);
-			console.log('📊 Contract Total Supply:', totalSupply);
+        // Get total supply from contract
+        let totalSupply = 0;
+        try {
+            const contractTotalSupply = await nftContract.methods.totalSupply().call();
+            totalSupply = Number(contractTotalSupply);
+            console.log('📊 Contract Total Supply:', totalSupply);
 
-			if (totalSupply <= 0) {
-				console.warn('⚠️ Total supply is 0, using fallback of 1');
-				totalSupply = 1;
-			}
-		} catch (contractError) {
-			console.error('❌ Error fetching total supply from contract:', contractError);
-			totalSupply = Math.max(userNFTsOwned, 1);
-			console.log('📊 Using fallback total supply:', totalSupply);
-		}
+            if (totalSupply <= 0) {
+                console.warn('⚠️ Total supply is 0, using fallback of 1');
+                totalSupply = 1;
+            }
+        } catch (contractError) {
+            console.error('❌ Error fetching total supply from contract:', contractError);
+            totalSupply = Math.max(userNFTsOwned, 1);
+            console.log('📊 Using fallback total supply:', totalSupply);
+        }
 
-		// Calculate user's share percentage
-		const sharePercentage = userNFTsOwned / totalSupply;
+        // Calculate user's share percentage
+        const sharePercentage = userNFTsOwned / totalSupply;
 
-		// Get user's wallet address
-		const walletAddress = userData.walletAddress;
+        // Get user's wallet address
+        const walletAddress = userData.walletAddress;
 
-		if (!walletAddress) {
-			return {
-				availableAmount: 0,
-				totalEligible: 0,
-				totalWithdrawn: 0,
-				sharePercentage: 0,
-				error: 'No wallet address found'
-			};
-		}
+        if (!walletAddress) {
+            return {
+                availableAmount: 0,
+                totalEligible: 0,
+                totalWithdrawn: 0,
+                sharePercentage: 0,
+                error: 'No wallet address found'
+            };
+        }
 
-		// Get ALL disbursements (both active and inactive)
-		const disbursementHistory = await db.collection('disbursement_history')
-			.orderBy('createdAt', 'asc')
-			.get();
+        // ✅ FIXED: Get ONLY ACTIVE disbursements
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0]; // Format: YYYY-MM-DD
 
-		if (disbursementHistory.empty) {
-			console.warn('⚠️ No disbursements configured');
-			return {
-				availableAmount: 0,
-				totalEligible: 0,
-				totalWithdrawn: 0,
-				sharePercentage: 0,
-				disbursementAmount: 0,
-				totalSupply: totalSupply,
-				userNFTsOwned: userNFTsOwned,
-				error: 'No disbursements configured'
-			};
-		}
+        const disbursementHistory = await db.collection('disbursement_history')
+            .where('isActive', '==', true) // ✅ Only active disbursements
+            .orderBy('createdAt', 'asc')
+            .get();
 
-		// Get user's withdrawal history organized by disbursement
-		const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
-		const withdrawalsByDisbursement = withdrawalData.withdrawalsByDisbursement;
+        if (disbursementHistory.empty) {
+            console.warn('⚠️ No active disbursements configured');
+            return {
+                availableAmount: 0,
+                totalEligible: 0,
+                totalWithdrawn: 0,
+                sharePercentage: 0,
+                disbursementAmount: 0,
+                totalSupply: totalSupply,
+                userNFTsOwned: userNFTsOwned,
+                error: 'No active disbursements configured'
+            };
+        }
 
-		console.log('📊 Withdrawal history:', withdrawalsByDisbursement);
+        // Get user's withdrawal history organized by disbursement
+        const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
+        const withdrawalsByDisbursement = withdrawalData.withdrawalsByDisbursement;
 
-		// Calculate cumulative available amount across ALL disbursements
-		let totalEligibleAllDisbursements = 0;
-		let totalWithdrawnAllDisbursements = withdrawalData.totalWithdrawnAllTime;
-		let cumulativeAvailable = 0;
+        console.log('📊 Withdrawal history:', withdrawalsByDisbursement);
 
-		const disbursementBreakdown = [];
+        // Calculate available amount from ACTIVE disbursements only
+        let totalEligibleActiveDisbursements = 0;
+        let totalWithdrawnActiveDisbursements = 0;
+        let cumulativeAvailable = 0;
 
-		disbursementHistory.forEach(doc => {
-			const disbursement = doc.data();
-			const disbursementId = disbursement.disbursementId;
-			const disbursementAmount = disbursement.totalLimit || 0;
+        const disbursementBreakdown = [];
 
-			// Calculate what user is eligible for from THIS disbursement
-			const eligibleFromThisDisbursement = disbursementAmount * sharePercentage;
+        disbursementHistory.forEach(doc => {
+            const disbursement = doc.data();
+            const disbursementId = disbursement.disbursementId;
+            const disbursementAmount = disbursement.totalLimit || 0;
 
-			// Get what user has already withdrawn from THIS disbursement
-			const withdrawnFromThisDisbursement = withdrawalsByDisbursement[disbursementId] || 0;
+            // ✅ FIXED: Check if disbursement period has ended
+            let isExpired = false;
+            if (disbursement.toDate) {
+                const endDate = new Date(disbursement.toDate);
+                const endDateStr = endDate.toISOString().split('T')[0];
+                isExpired = todayStr > endDateStr;
+            }
 
-			// Calculate remaining from THIS disbursement
-			const remainingFromThisDisbursement = Math.max(0, eligibleFromThisDisbursement - withdrawnFromThisDisbursement);
+            // ✅ Skip expired disbursements
+            if (isExpired) {
+                console.log(`⏰ Skipping expired disbursement: ${disbursementId} (ended: ${disbursement.toDate})`);
+                return; // Continue to next disbursement
+            }
 
-			// Add to totals
-			totalEligibleAllDisbursements += eligibleFromThisDisbursement;
-			cumulativeAvailable += remainingFromThisDisbursement;
+            // Calculate what user is eligible for from THIS active disbursement
+            const eligibleFromThisDisbursement = disbursementAmount * sharePercentage;
 
-			// Store breakdown for debugging
-			disbursementBreakdown.push({
-				disbursementId: disbursementId,
-				period: disbursement.period || 'N/A',
-				totalAmount: disbursementAmount,
-				eligible: eligibleFromThisDisbursement.toFixed(2),
-				withdrawn: withdrawnFromThisDisbursement.toFixed(2),
-				remaining: remainingFromThisDisbursement.toFixed(2),
-				isActive: disbursement.isActive || false
-			});
-		});
+            // Get what user has already withdrawn from THIS disbursement
+            const withdrawnFromThisDisbursement = withdrawalsByDisbursement[disbursementId] || 0;
 
-		console.log('📊 CUMULATIVE CALCULATION:');
-		console.log('  - Total Disbursements:', disbursementHistory.size);
-		console.log('  - User Share Percentage:', (sharePercentage * 100).toFixed(3) + '%');
-		console.log('  - Total Eligible (All Time):', totalEligibleAllDisbursements.toFixed(2));
-		console.log('  - Total Withdrawn (All Time):', totalWithdrawnAllDisbursements.toFixed(2));
-		console.log('  - Cumulative Available:', cumulativeAvailable.toFixed(2));
-		console.log('📋 Disbursement Breakdown:', disbursementBreakdown);
+            // Calculate remaining from THIS disbursement
+            const remainingFromThisDisbursement = Math.max(0, eligibleFromThisDisbursement - withdrawnFromThisDisbursement);
 
-		// Get current active disbursement for reference
-		const activeDisbursement = disbursementHistory.docs.find(doc => doc.data().isActive);
-		const currentDisbursementId = activeDisbursement ? activeDisbursement.data().disbursementId : null;
+            // Add to active totals
+            totalEligibleActiveDisbursements += eligibleFromThisDisbursement;
+            totalWithdrawnActiveDisbursements += withdrawnFromThisDisbursement;
+            cumulativeAvailable += remainingFromThisDisbursement;
 
-		const result = {
-			availableAmount: Number(cumulativeAvailable.toFixed(2)),
-			totalEligible: Number(totalEligibleAllDisbursements.toFixed(2)),
-			totalWithdrawn: Number(totalWithdrawnAllDisbursements.toFixed(2)),
-			sharePercentage: Number((sharePercentage * 100).toFixed(3)),
-			totalSupply: Number(totalSupply),
-			userNFTsOwned: Number(userNFTsOwned),
-			currentDisbursementId: currentDisbursementId,
-			totalDisbursements: disbursementHistory.size,
-			disbursementBreakdown: disbursementBreakdown, // For detailed view
-			isCumulative: true // Flag to indicate this is cumulative calculation
-		};
+            // Store breakdown for debugging
+            disbursementBreakdown.push({
+                disbursementId: disbursementId,
+                period: disbursement.period || 'N/A',
+                fromDate: disbursement.fromDate || 'N/A',
+                toDate: disbursement.toDate || 'N/A',
+                totalAmount: disbursementAmount,
+                eligible: eligibleFromThisDisbursement.toFixed(2),
+                withdrawn: withdrawnFromThisDisbursement.toFixed(2),
+                remaining: remainingFromThisDisbursement.toFixed(2),
+                isActive: true,
+                isExpired: false
+            });
+        });
 
-		console.log('✅ Final CUMULATIVE calculation result:', result);
-		return result;
+        console.log('📊 ACTIVE DISBURSEMENTS CALCULATION:');
+        console.log('  - Active Disbursements:', disbursementHistory.size);
+        console.log('  - User Share Percentage:', (sharePercentage * 100).toFixed(3) + '%');
+        console.log('  - Total Eligible (Active Only):', totalEligibleActiveDisbursements.toFixed(2));
+        console.log('  - Total Withdrawn (Active Only):', totalWithdrawnActiveDisbursements.toFixed(2));
+        console.log('  - Available Balance:', cumulativeAvailable.toFixed(2));
+        console.log('📋 Active Disbursement Breakdown:', disbursementBreakdown);
 
-	} catch (error) {
-		console.error('❌ Error in calculateUserPayout:', error);
-		return {
-			availableAmount: 0,
-			totalEligible: 0,
-			totalWithdrawn: 0,
-			sharePercentage: 0,
-			error: error.message
-		};
-	}
+        // Get current active disbursement for reference
+        const activeDisbursement = disbursementHistory.docs.find(doc => doc.data().isActive);
+        const currentDisbursementId = activeDisbursement ? activeDisbursement.data().disbursementId : null;
+
+        const result = {
+            availableAmount: Number(cumulativeAvailable.toFixed(2)),
+            totalEligible: Number(totalEligibleActiveDisbursements.toFixed(2)),
+            totalWithdrawn: Number(totalWithdrawnActiveDisbursements.toFixed(2)),
+            sharePercentage: Number((sharePercentage * 100).toFixed(3)),
+            totalSupply: Number(totalSupply),
+            userNFTsOwned: Number(userNFTsOwned),
+            currentDisbursementId: currentDisbursementId,
+            totalActiveDisbursements: disbursementHistory.size,
+            disbursementBreakdown: disbursementBreakdown,
+            isActiveOnly: true // Flag indicating only active disbursements
+        };
+
+        console.log('✅ Final ACTIVE disbursements calculation result:', result);
+        return result;
+
+    } catch (error) {
+        console.error('❌ Error in calculateUserPayout:', error);
+        return {
+            availableAmount: 0,
+            totalEligible: 0,
+            totalWithdrawn: 0,
+            sharePercentage: 0,
+            error: error.message
+        };
+    }
 };
 
 // Get total payout pool from your system
