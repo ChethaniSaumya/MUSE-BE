@@ -3414,7 +3414,7 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 	}
 };
 
-// Replace your calculateUserPayout function with this fixed version:
+// FIXED VERSION - Replace your calculateUserPayout function with this
 
 const calculateUserPayout = async (userData) => {
     try {
@@ -3423,19 +3423,34 @@ const calculateUserPayout = async (userData) => {
         const userNFTsOwned = userData.totalMinted || 0;
         console.log('📊 User NFTs owned:', userNFTsOwned);
 
-        // Get total supply from contract
+        // ✅ FIX 1: Add retry logic and better error handling for contract call
         let totalSupply = 0;
-        try {
-            const contractTotalSupply = await nftContract.methods.totalSupply().call();
-            totalSupply = Number(contractTotalSupply);
-            console.log('📊 Contract Total Supply:', totalSupply);
-
-            if (totalSupply <= 0) {
-                console.warn('⚠️ Total supply is 0, using fallback of 1');
-                totalSupply = 1;
+        let retryCount = 0;
+        const maxRetries = 3;
+        
+        while (retryCount < maxRetries) {
+            try {
+                const contractTotalSupply = await nftContract.methods.totalSupply().call();
+                totalSupply = Number(contractTotalSupply);
+                console.log('📊 Contract Total Supply:', totalSupply);
+                break; // Success - exit retry loop
+            } catch (contractError) {
+                retryCount++;
+                console.error(`❌ Attempt ${retryCount}/${maxRetries} - Error fetching total supply:`, contractError.message);
+                
+                if (retryCount < maxRetries) {
+                    // Wait before retrying (exponential backoff)
+                    await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+                } else {
+                    // All retries failed - use fallback
+                    console.warn('⚠️ All retries failed, using fallback total supply');
+                }
             }
-        } catch (contractError) {
-            console.error('❌ Error fetching total supply from contract:', contractError);
+        }
+
+        // Fallback if contract call fails
+        if (totalSupply <= 0) {
+            console.warn('⚠️ Total supply is 0 or contract call failed, using fallback');
             totalSupply = Math.max(userNFTsOwned, 1);
             console.log('📊 Using fallback total supply:', totalSupply);
         }
@@ -3456,16 +3471,62 @@ const calculateUserPayout = async (userData) => {
             };
         }
 
-        // ✅ FIXED: Get ONLY ACTIVE disbursements
+        // ✅ FIX 2: Modified query to work without composite index
+        // Get ONLY ACTIVE disbursements - SIMPLIFIED QUERY
         const now = new Date();
-        const todayStr = now.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+        const todayStr = now.toISOString().split('T')[0];
 
-        const disbursementHistory = await db.collection('disbursement_history')
-            .where('isActive', '==', true) // ✅ Only active disbursements
-            .orderBy('createdAt', 'asc')
-            .get();
+        // Get all disbursements first, then filter in memory
+        let disbursementHistory;
+        try {
+            disbursementHistory = await db.collection('disbursement_history')
+                .orderBy('createdAt', 'asc')
+                .get();
+        } catch (indexError) {
+            console.error('❌ Index error, trying without orderBy:', indexError.message);
+            // Fallback: Get without ordering if index doesn't exist
+            disbursementHistory = await db.collection('disbursement_history').get();
+        }
 
         if (disbursementHistory.empty) {
+            console.warn('⚠️ No disbursements configured');
+            return {
+                availableAmount: 0,
+                totalEligible: 0,
+                totalWithdrawn: 0,
+                sharePercentage: 0,
+                disbursementAmount: 0,
+                totalSupply: totalSupply,
+                userNFTsOwned: userNFTsOwned,
+                error: 'No disbursements configured'
+            };
+        }
+
+        // ✅ FIX 3: Filter active disbursements IN MEMORY
+        const activeDisbursements = [];
+        disbursementHistory.forEach(doc => {
+            const disbursement = doc.data();
+            
+            // Check if disbursement is active AND not expired
+            let isExpired = false;
+            if (disbursement.toDate) {
+                const endDate = new Date(disbursement.toDate);
+                const endDateStr = endDate.toISOString().split('T')[0];
+                isExpired = todayStr > endDateStr;
+            }
+            
+            // Only include if isActive === true AND not expired
+            if (disbursement.isActive === true && !isExpired) {
+                activeDisbursements.push({
+                    id: doc.id,
+                    ...disbursement
+                });
+            }
+        });
+
+        console.log(`📊 Found ${activeDisbursements.length} active disbursements (filtered from ${disbursementHistory.size} total)`);
+
+        if (activeDisbursements.length === 0) {
             console.warn('⚠️ No active disbursements configured');
             return {
                 availableAmount: 0,
@@ -3478,6 +3539,13 @@ const calculateUserPayout = async (userData) => {
                 error: 'No active disbursements configured'
             };
         }
+
+        // Sort by creation date (oldest first)
+        activeDisbursements.sort((a, b) => {
+            const dateA = new Date(a.createdAt || 0);
+            const dateB = new Date(b.createdAt || 0);
+            return dateA - dateB;
+        });
 
         // Get user's withdrawal history organized by disbursement
         const withdrawalData = await getUserWithdrawalsByDisbursement(walletAddress);
@@ -3492,24 +3560,9 @@ const calculateUserPayout = async (userData) => {
 
         const disbursementBreakdown = [];
 
-        disbursementHistory.forEach(doc => {
-            const disbursement = doc.data();
+        activeDisbursements.forEach(disbursement => {
             const disbursementId = disbursement.disbursementId;
             const disbursementAmount = disbursement.totalLimit || 0;
-
-            // ✅ FIXED: Check if disbursement period has ended
-            let isExpired = false;
-            if (disbursement.toDate) {
-                const endDate = new Date(disbursement.toDate);
-                const endDateStr = endDate.toISOString().split('T')[0];
-                isExpired = todayStr > endDateStr;
-            }
-
-            // ✅ Skip expired disbursements
-            if (isExpired) {
-                console.log(`⏰ Skipping expired disbursement: ${disbursementId} (ended: ${disbursement.toDate})`);
-                return; // Continue to next disbursement
-            }
 
             // Calculate what user is eligible for from THIS active disbursement
             const eligibleFromThisDisbursement = disbursementAmount * sharePercentage;
@@ -3541,7 +3594,7 @@ const calculateUserPayout = async (userData) => {
         });
 
         console.log('📊 ACTIVE DISBURSEMENTS CALCULATION:');
-        console.log('  - Active Disbursements:', disbursementHistory.size);
+        console.log('  - Active Disbursements:', activeDisbursements.length);
         console.log('  - User Share Percentage:', (sharePercentage * 100).toFixed(3) + '%');
         console.log('  - Total Eligible (Active Only):', totalEligibleActiveDisbursements.toFixed(2));
         console.log('  - Total Withdrawn (Active Only):', totalWithdrawnActiveDisbursements.toFixed(2));
@@ -3549,8 +3602,7 @@ const calculateUserPayout = async (userData) => {
         console.log('📋 Active Disbursement Breakdown:', disbursementBreakdown);
 
         // Get current active disbursement for reference
-        const activeDisbursement = disbursementHistory.docs.find(doc => doc.data().isActive);
-        const currentDisbursementId = activeDisbursement ? activeDisbursement.data().disbursementId : null;
+        const currentDisbursementId = activeDisbursements[activeDisbursements.length - 1]?.disbursementId || null;
 
         const result = {
             availableAmount: Number(cumulativeAvailable.toFixed(2)),
@@ -3560,9 +3612,9 @@ const calculateUserPayout = async (userData) => {
             totalSupply: Number(totalSupply),
             userNFTsOwned: Number(userNFTsOwned),
             currentDisbursementId: currentDisbursementId,
-            totalActiveDisbursements: disbursementHistory.size,
+            totalActiveDisbursements: activeDisbursements.length,
             disbursementBreakdown: disbursementBreakdown,
-            isActiveOnly: true // Flag indicating only active disbursements
+            isActiveOnly: true
         };
 
         console.log('✅ Final ACTIVE disbursements calculation result:', result);
