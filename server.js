@@ -3356,7 +3356,7 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 			.get();
 
 		if (!paypalDoc.exists) {
-			console.log('📭 No PayPal data found for wallet');
+			console.log('🔭 No PayPal data found for wallet');
 			return {
 				totalWithdrawnAllTime: 0,
 				withdrawalsByDisbursement: {},
@@ -3367,12 +3367,20 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 		const paypalData = paypalDoc.data();
 		const payouts = paypalData.payouts || [];
 
-		// Filter only completed payouts
+		// ✅ FIX: Check for multiple status values
 		const completedPayouts = payouts.filter(payout =>
-			payout.status === 'completed'
+			payout.status === 'completed' || 
+			payout.status === 'success' ||
+			payout.paypalStatus === 'SUCCESS'
 		);
 
 		console.log(`📊 Found ${completedPayouts.length} completed payouts`);
+		console.log(`📊 All payouts:`, payouts.map(p => ({ 
+			id: p.id, 
+			status: p.status, 
+			paypalStatus: p.paypalStatus,
+			amount: p.amount 
+		})));
 
 		// Calculate total withdrawn across all disbursements
 		const totalWithdrawnAllTime = completedPayouts.reduce((sum, payout) => {
@@ -3699,7 +3707,69 @@ app.get('/api/users/:email/payout-info', cors(corsOptions), async (req, res) => 
 	}
 });
 
-// MAKE SURE you have this endpoint in your server.js
+// Get all project names for dropdown
+app.get('/api/admin/project-names', cors(corsOptions), async (req, res) => {
+	try {
+		const disbursementsSnapshot = await db.collection('disbursement_history')
+			.orderBy('createdAt', 'desc')
+			.get();
+
+		// Extract unique project names
+		const projectNames = new Set();
+		disbursementsSnapshot.forEach(doc => {
+			const projectName = doc.data().projectName;
+			if (projectName && projectName.trim() !== '') {
+				projectNames.add(projectName);
+			}
+		});
+
+		const projectNamesArray = Array.from(projectNames);
+
+		res.json({
+			success: true,
+			projectNames: projectNamesArray
+		});
+
+	} catch (error) {
+		console.error('Error fetching project names:', error);
+		res.status(500).json({ 
+			error: 'Failed to fetch project names',
+			details: error.message 
+		});
+	}
+});
+
+app.get('/api/debug/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		
+		const paypalDoc = await db.collection('paypal')
+			.doc(walletAddress.toLowerCase())
+			.get();
+
+		if (!paypalDoc.exists) {
+			return res.json({ error: 'No PayPal data found' });
+		}
+
+		const data = paypalDoc.data();
+		
+		res.json({
+			paypalEmail: data.paypalEmail,
+			totalPayouts: data.payouts?.length || 0,
+			payouts: data.payouts || [],
+			payoutDetails: data.payouts?.map(p => ({
+				id: p.id,
+				amount: p.amount,
+				status: p.status,
+				paypalStatus: p.paypalStatus,
+				requestedAt: p.requestedAt
+			}))
+		});
+
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
 
 // Admin endpoint to update identity document verification status - NO ADMIN KEY
 app.put('/api/admin/paypal/:walletAddress/verify-identity', cors(corsOptions), async (req, res) => {
