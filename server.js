@@ -2014,7 +2014,7 @@ app.get('/api/payout-limits/current', cors(corsOptions), async (req, res) => {
 		console.error('Error fetching current payout limits:', error);
 		res.status(500).json({ error: 'Failed to fetch payout limits' });
 	}
-});
+}); 
 
 // ADD: Public endpoint to show remaining limits (without admin auth)
 app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
@@ -2040,6 +2040,135 @@ app.get('/api/payout-limits/public', cors(corsOptions), async (req, res) => {
 	} catch (error) {
 		console.error('Error fetching public limits:', error);
 		res.status(500).json({ error: 'Failed to fetch limits' });
+	}
+});
+ 
+app.get('/api/admin/debug-user-payouts/:walletAddress', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		
+		const paypalDoc = await db.collection('paypal')
+			.doc(walletAddress.toLowerCase())
+			.get();
+
+		if (!paypalDoc.exists) {
+			return res.json({ error: 'No payouts found' });
+		}
+
+		const paypalData = paypalDoc.data();
+		const payouts = paypalData.payouts || [];
+
+		const payoutDetails = payouts.map(p => ({
+			id: p.id,
+			amount: p.amount,
+			status: p.status,
+			disbursementId: p.disbursementId,
+			requestedAt: p.requestedAt
+		}));
+
+		res.json({
+			success: true,
+			totalPayouts: payouts.length,
+			payouts: payoutDetails,
+			rawPayouts: payouts
+		});
+
+	} catch (error) {
+		res.status(500).json({ error: error.message });
+	}
+});
+
+app.post('/api/admin/standardize-all-statuses', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		console.log('🔧 Starting complete status standardization...');
+
+		const paypalSnapshot = await db.collection('paypal').get();
+
+		let totalUpdated = 0;
+		let totalDeleted = 0;
+		let totalPayouts = 0;
+		const updates = [];
+
+		for (const doc of paypalSnapshot.docs) {
+			const paypalData = doc.data();
+			const payouts = paypalData.payouts || [];
+
+			let modified = false;
+			const cleanedPayouts = [];
+
+			payouts.forEach(payout => {
+				totalPayouts++;
+
+				// Remove test payouts without proper disbursementId
+				if (!payout.disbursementId || payout.disbursementId === 'legacy_disbursement') {
+					console.log(`Removing legacy/test payout ${payout.id} from wallet ${doc.id}`);
+					totalDeleted++;
+					modified = true;
+					return;
+				}
+
+				// Standardize status for real payouts
+				if (payout.status === 'completed' || payout.status === 'SUCCESS') {
+					payout.status = 'success';
+					totalUpdated++;
+					modified = true;
+				}
+
+				cleanedPayouts.push(payout);
+			});
+
+			if (modified) {
+				updates.push(
+					db.collection('paypal').doc(doc.id).update({
+						payouts: cleanedPayouts,
+						lastStatusUpdate: new Date().toISOString()
+					})
+				);
+			}
+		}
+
+		await Promise.all(updates);
+
+		console.log(`✅ Complete! Updated: ${totalUpdated}, Deleted: ${totalDeleted}, Total processed: ${totalPayouts}`);
+
+		res.json({
+			success: true,
+			message: 'Complete standardization finished',
+			totalPayouts: totalPayouts,
+			updatedPayouts: totalUpdated,
+			deletedPayouts: totalDeleted,
+			documentsUpdated: updates.length
+		});
+
+	} catch (error) {
+		console.error('❌ Standardization failed:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Standardization failed',
+			details: error.message
+		});
+	}
+});
+ 
+app.post('/api/admin/clear-user-payouts/:walletAddress', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		const walletAddress = req.params.walletAddress;
+		
+		await db.collection('paypal').doc(walletAddress.toLowerCase()).update({
+			payouts: [],
+			lastPayoutAt: null,
+			updatedAt: new Date().toISOString()
+		});
+
+		console.log(`✅ Cleared all payouts for wallet: ${walletAddress}`);
+
+		res.json({
+			success: true,
+			message: 'Payouts cleared'
+		});
+
+	} catch (error) {
+		res.status(500).json({ error: error.message });
 	}
 });
 
@@ -3367,24 +3496,20 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 		const paypalData = paypalDoc.data();
 		const payouts = paypalData.payouts || [];
 
-		// ✅ FIX: Check for multiple status values
+		// ✅ FIX: Filter for ALL successful payout statuses
 		const completedPayouts = payouts.filter(payout =>
 			payout.status === 'completed' || 
-			payout.status === 'success' ||
-			payout.paypalStatus === 'SUCCESS'
+			payout.status === 'success' || 
+			payout.status === 'SUCCESS'
 		);
 
-		console.log(`📊 Found ${completedPayouts.length} completed payouts`);
-		console.log(`📊 All payouts:`, payouts.map(p => ({ 
-			id: p.id, 
-			status: p.status, 
-			paypalStatus: p.paypalStatus,
-			amount: p.amount 
-		})));
+		console.log(`📊 Found ${completedPayouts.length} completed payouts out of ${payouts.length} total`);
 
 		// Calculate total withdrawn across all disbursements
 		const totalWithdrawnAllTime = completedPayouts.reduce((sum, payout) => {
-			return sum + (parseFloat(payout.amount) || 0);
+			const amount = parseFloat(payout.amount) || 0;
+			console.log(`   Adding withdrawal: $${amount} (status: ${payout.status})`);
+			return sum + amount;
 		}, 0);
 
 		// Group withdrawals by disbursement ID
@@ -3401,7 +3526,7 @@ const getUserWithdrawalsByDisbursement = async (walletAddress) => {
 		});
 
 		console.log('📊 Withdrawals by disbursement:', withdrawalsByDisbursement);
-		console.log('💰 Total withdrawn all time:', totalWithdrawnAllTime);
+		console.log('💰 Total withdrawn all time:', totalWithdrawnAllTime.toFixed(2));
 
 		return {
 			totalWithdrawnAllTime: totalWithdrawnAllTime,
@@ -3472,7 +3597,7 @@ const calculateUserPayout = async (userData) => {
 			};
 		}
 
-		// Get ALL disbursements (no filtering yet)
+		// Get ALL disbursements
 		const now = new Date();
 		const todayStr = now.toISOString().split('T')[0];
 
@@ -3524,13 +3649,14 @@ const calculateUserPayout = async (userData) => {
 		console.log('💰 Total withdrawn (all time):', totalWithdrawn.toFixed(2));
 
 		// ============================================
-		// ✅ CUMULATIVE CALCULATION (NEW LOGIC)
+		// ✅ CUMULATIVE CALCULATION - ONLY ACTIVE DISBURSEMENTS
 		// ============================================
 
 		let cumulativeBalance = 0;
 		const disbursementBreakdown = [];
 		let totalEligible = 0;
 		let activeCount = 0;
+		let inactiveCount = 0;
 
 		allDisbursements.forEach((disbursement, index) => {
 			const disbursementId = disbursement.disbursementId;
@@ -3549,17 +3675,31 @@ const calculateUserPayout = async (userData) => {
 
 			if (isActive) {
 				activeCount++;
+			} else {
+				inactiveCount++;
 			}
 
-			// Calculate what user earns from THIS disbursement
-			const earnedFromThis = disbursementAmount * sharePercentage;
+			// ✅ ONLY calculate earnings for ACTIVE disbursements
+			let earnedFromThis = 0;
+			if (isActive) {
+				earnedFromThis = disbursementAmount * sharePercentage;
 
-			// ✅ CUMULATIVE ADDITION
-			const previousBalance = cumulativeBalance;
-			cumulativeBalance += earnedFromThis;
-			totalEligible = cumulativeBalance; // Keep track of total eligible
+				// ✅ CUMULATIVE ADDITION - Only from active disbursements
+				const previousBalance = cumulativeBalance;
+				cumulativeBalance += earnedFromThis;
+				totalEligible = cumulativeBalance;
 
-			// Store breakdown
+				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [ACTIVE]`);
+				console.log(`   Amount: $${disbursementAmount}`);
+				console.log(`   Earned: $${earnedFromThis.toFixed(2)}`);
+				console.log(`   Previous Balance: $${previousBalance.toFixed(2)}`);
+				console.log(`   Cumulative After: $${cumulativeBalance.toFixed(2)}`);
+			} else {
+				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [INACTIVE - EXCLUDED]`);
+				console.log(`   Status: ${isExpired ? 'Expired' : 'Manually Inactive'}`);
+			}
+
+			// Store breakdown for ALL disbursements (for transparency)
 			disbursementBreakdown.push({
 				disbursementId: disbursementId,
 				period: disbursement.period || 'N/A',
@@ -3567,29 +3707,24 @@ const calculateUserPayout = async (userData) => {
 				toDate: disbursement.toDate || 'N/A',
 				totalAmount: disbursementAmount,
 				earnedFromThis: earnedFromThis.toFixed(2),
-				previousBalance: previousBalance.toFixed(2),
+				previousBalance: index === 0 ? '0.00' : disbursementBreakdown[index - 1]?.cumulativeAfterThis || '0.00',
 				cumulativeAfterThis: cumulativeBalance.toFixed(2),
 				isActive: isActive,
 				isExpired: isExpired,
+				includedInCalculation: isActive,  // ✅ New field to show if it's counted
 				order: index + 1
 			});
-
-			console.log(`📋 Disbursement ${index + 1}: ${disbursementId}`);
-			console.log(`   Amount: $${disbursementAmount}`);
-			console.log(`   Earned: $${earnedFromThis.toFixed(2)}`);
-			console.log(`   Previous Balance: $${previousBalance.toFixed(2)}`);
-			console.log(`   Cumulative After: $${cumulativeBalance.toFixed(2)}`);
-			console.log(`   Status: ${isActive ? 'Active' : (isExpired ? 'Expired' : 'Inactive')}`);
 		});
 
-		// ✅ FINAL AVAILABLE = CUMULATIVE ELIGIBLE - TOTAL WITHDRAWN
+		// ✅ FINAL AVAILABLE = CUMULATIVE ELIGIBLE (from active only) - TOTAL WITHDRAWN
 		const availableAmount = Math.max(0, cumulativeBalance - totalWithdrawn);
 
 		console.log('\n📊 ========== CUMULATIVE CALCULATION SUMMARY ==========');
 		console.log(`Total Disbursements: ${allDisbursements.length}`);
 		console.log(`Active Disbursements: ${activeCount}`);
+		console.log(`Inactive/Expired Disbursements: ${inactiveCount}`);
 		console.log(`User Share: ${(sharePercentage * 100).toFixed(3)}%`);
-		console.log(`Cumulative Eligible: $${totalEligible.toFixed(2)}`);
+		console.log(`Cumulative Eligible (Active Only): $${totalEligible.toFixed(2)}`);
 		console.log(`Total Withdrawn: $${totalWithdrawn.toFixed(2)}`);
 		console.log(`Available Balance: $${availableAmount.toFixed(2)}`);
 		console.log('====================================================\n');
@@ -3603,8 +3738,9 @@ const calculateUserPayout = async (userData) => {
 			userNFTsOwned: Number(userNFTsOwned),
 			totalDisbursements: allDisbursements.length,
 			activeDisbursements: activeCount,
+			inactiveDisbursements: inactiveCount,
 			disbursementBreakdown: disbursementBreakdown,
-			calculationMethod: 'cumulative'
+			calculationMethod: 'cumulative-active-only'
 		};
 
 		console.log('✅ Final calculation result:', result);
@@ -3621,7 +3757,6 @@ const calculateUserPayout = async (userData) => {
 		};
 	}
 };
-
 
 // Get total payout pool from your system
 const getTotalPayoutPool = async () => {
@@ -3707,69 +3842,7 @@ app.get('/api/users/:email/payout-info', cors(corsOptions), async (req, res) => 
 	}
 });
 
-// Get all project names for dropdown
-app.get('/api/admin/project-names', cors(corsOptions), async (req, res) => {
-	try {
-		const disbursementsSnapshot = await db.collection('disbursement_history')
-			.orderBy('createdAt', 'desc')
-			.get();
-
-		// Extract unique project names
-		const projectNames = new Set();
-		disbursementsSnapshot.forEach(doc => {
-			const projectName = doc.data().projectName;
-			if (projectName && projectName.trim() !== '') {
-				projectNames.add(projectName);
-			}
-		});
-
-		const projectNamesArray = Array.from(projectNames);
-
-		res.json({
-			success: true,
-			projectNames: projectNamesArray
-		});
-
-	} catch (error) {
-		console.error('Error fetching project names:', error);
-		res.status(500).json({ 
-			error: 'Failed to fetch project names',
-			details: error.message 
-		});
-	}
-});
-
-app.get('/api/debug/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
-	try {
-		const walletAddress = req.params.walletAddress;
-		
-		const paypalDoc = await db.collection('paypal')
-			.doc(walletAddress.toLowerCase())
-			.get();
-
-		if (!paypalDoc.exists) {
-			return res.json({ error: 'No PayPal data found' });
-		}
-
-		const data = paypalDoc.data();
-		
-		res.json({
-			paypalEmail: data.paypalEmail,
-			totalPayouts: data.payouts?.length || 0,
-			payouts: data.payouts || [],
-			payoutDetails: data.payouts?.map(p => ({
-				id: p.id,
-				amount: p.amount,
-				status: p.status,
-				paypalStatus: p.paypalStatus,
-				requestedAt: p.requestedAt
-			}))
-		});
-
-	} catch (error) {
-		res.status(500).json({ error: error.message });
-	}
-});
+// MAKE SURE you have this endpoint in your server.js
 
 // Admin endpoint to update identity document verification status - NO ADMIN KEY
 app.put('/api/admin/paypal/:walletAddress/verify-identity', cors(corsOptions), async (req, res) => {
@@ -4476,7 +4549,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		const payoutData = {
 			id: payoutId,
 			amount: withdrawAmount,
-			status: 'pending',
+			status: 'pending',  // Starts as pending, will be updated by checkPendingPayouts
 			paypalBatchId: response.result.batch_header.payout_batch_id,
 			paypalStatus: response.result.batch_header.batch_status,
 			requestedAt: new Date().toISOString(),
@@ -4491,7 +4564,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			disbursementId: currentDisbursementId,
 			cumulativeEligibleAtWithdrawal: payoutCalculation.totalEligible,
 			calculationMethod: 'cumulative'
-		};
+		}
 
 		await paypalRef.update({
 			payouts: [...existingPayouts, payoutData],
@@ -5065,13 +5138,15 @@ const checkPendingPayouts = async () => {
 
 					const payoutItem = response.result.items[0];
 
+					// In checkPendingPayouts function, update the success case:
+
 					if (payoutItem && payoutItem.transaction_status === 'SUCCESS') {
-						payout.status = 'completed';
+						payout.status = 'success';  // ✅ Changed from 'completed' to 'success'
 						payout.completedAt = new Date().toISOString();
 						payout.paypalTransactionId = payoutItem.transaction_id;
 						hasUpdates = true;
 
-						console.log(`✅ Payout ${payout.id} completed`);
+						console.log(`✅ Payout ${payout.id} completed with status: success`);
 					} else if (payoutItem && (payoutItem.transaction_status === 'FAILED' || payoutItem.transaction_status === 'RETURNED')) {
 						payout.status = 'failed';
 						payout.failureReason = payoutItem.errors ? payoutItem.errors[0].message : 'Transaction failed';
@@ -5197,6 +5272,67 @@ app.post('/api/paypal/:walletAddress/upload-identity', cors(corsOptions), async 
 		console.error('❌ Error uploading identity document:', error);
 		res.status(500).json({
 			error: 'Internal server error',
+			details: error.message
+		});
+	}
+});
+
+// Add this endpoint to server.js
+app.post('/api/admin/standardize-payout-statuses', cors(corsOptions), authenticateAdmin, async (req, res) => {
+	try {
+		console.log('🔧 Starting payout status standardization...');
+
+		const paypalSnapshot = await db.collection('paypal').get();
+
+		let totalUpdated = 0;
+		let totalPayouts = 0;
+		const updates = [];
+
+		for (const doc of paypalSnapshot.docs) {
+			const paypalData = doc.data();
+			const payouts = paypalData.payouts || [];
+
+			let modified = false;
+
+			payouts.forEach(payout => {
+				totalPayouts++;
+
+				// Standardize all 'completed' and 'SUCCESS' to 'success'
+				if (payout.status === 'completed' || payout.status === 'SUCCESS') {
+					payout.status = 'success';
+					modified = true;
+					totalUpdated++;
+					console.log(`Updated payout ${payout.id} status to 'success'`);
+				}
+			});
+
+			if (modified) {
+				updates.push(
+					db.collection('paypal').doc(doc.id).update({
+						payouts: payouts,
+						lastStatusUpdate: new Date().toISOString()
+					})
+				);
+			}
+		}
+
+		await Promise.all(updates);
+
+		console.log(`✅ Standardization complete: Updated ${totalUpdated} out of ${totalPayouts} payouts`);
+
+		res.json({
+			success: true,
+			message: 'Payout status standardization completed',
+			totalPayouts: totalPayouts,
+			updatedPayouts: totalUpdated,
+			documentsUpdated: updates.length
+		});
+
+	} catch (error) {
+		console.error('❌ Standardization failed:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Standardization failed',
 			details: error.message
 		});
 	}
