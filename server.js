@@ -2078,6 +2078,27 @@ app.get('/api/admin/debug-user-payouts/:walletAddress', cors(corsOptions), authe
 	}
 });
 
+// TEMPORARY - Remove authenticateAdmin for debugging
+app.get('/api/admin/paypal-account-info', cors(corsOptions), async (req, res) => {
+    try {
+        // Get access token to verify account
+        const request = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const response = await paypalClient.execute(request);
+        
+        res.json({
+            environment: paypalClient.environment.constructor.name,
+            clientId: process.env.PAYPAL_CLIENT_ID,
+            accountConnected: response.result ? 'Yes' : 'No',
+            tokenReceived: !!response.result.access_token
+        });
+    } catch (error) {
+        res.status(500).json({
+            error: error.message,
+            details: 'Failed to connect to PayPal'
+        });
+    }
+});
+
 app.post('/api/admin/standardize-all-statuses', cors(corsOptions), authenticateAdmin, async (req, res) => {
 	try {
 		console.log('🔧 Starting complete status standardization...');
@@ -4529,7 +4550,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 				recipient_type: "EMAIL",
 				amount: {
 					value: withdrawAmount.toFixed(2),
-					currency: "USD"
+					currency: "GBP"
 				},
 				receiver: paypalData.paypalEmail,
 				sender_item_id: payoutId
@@ -4577,7 +4598,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 		console.log('💰 Remaining CUMULATIVE available:', (availableAmount - withdrawAmount).toFixed(2));
 
 		res.json({
-			success: false,
+			success: true,
 			message: `Withdrawal request of $${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
 			payoutId: payoutId,
 			amount: withdrawAmount,
@@ -4603,6 +4624,521 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 	}
 });
 
+app.post('/api/admin/test-mini-payout-v2', cors(corsOptions), async (req, res) => {
+    const { currency, amount } = req.body;
+    
+    try {
+        const payoutId = `test_mini_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        console.log('🧪 Testing mini payout v2...');
+        console.log('Currency:', currency || 'GBP');
+        console.log('Amount:', amount || '1.00');
+        
+        // ✅ Use EXACT same pattern as your working code
+        const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+
+        payoutRequest.requestBody({
+            sender_batch_header: {
+                sender_batch_id: payoutId,
+                email_subject: "Test Withdrawal from Hope KK NFTs",
+                email_message: "This is a test payout."
+            },
+            items: [{
+                recipient_type: "EMAIL",
+                amount: {
+                    value: parseFloat(amount || '1.00').toFixed(2),
+                    currency: currency || "GBP"
+                },
+                receiver: "sumi.shreegopal@gmail.com",
+                sender_item_id: payoutId
+            }]
+        });
+
+        console.log('📤 Executing PayPal request...');
+        const response = await paypalClient.execute(payoutRequest);
+
+        console.log('✅ Payout submitted - Status:', response.result.batch_header.batch_status);
+
+        res.json({
+            success: true,
+            message: 'Test payout sent successfully!',
+            payoutId: payoutId,
+            amount: parseFloat(amount || '1.00'),
+            paypalBatchId: response.result.batch_header.payout_batch_id,
+            status: response.result.batch_header.batch_status,
+            currency: currency || 'GBP',
+            response: response.result
+        });
+
+    } catch (error) {
+        console.error('❌ Test payout failed:', error);
+        
+        const errorDetails = error._originalError?.text 
+            ? JSON.parse(error._originalError.text) 
+            : {};
+        
+        res.json({
+            success: false,
+            error: error.message,
+            errorName: error.name || errorDetails.name,
+            statusCode: error.statusCode,
+            details: errorDetails,
+            recommendation: errorDetails.name === 'INSUFFICIENT_FUNDS' 
+                ? `Your PayPal account doesn't have enough ${currency || 'GBP'}` 
+                : 'Check error details'
+        });
+    }
+});
+
+// Check PayPal account balance
+app.get('/api/admin/check-paypal-balance', cors(corsOptions), async (req, res) => {
+    try {
+        console.log('🔍 Checking PayPal account balance...');
+        
+        // Create a request to get account info
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        
+        console.log('✅ Access Token received');
+        
+        // Try to get balance using v1/reporting/balances endpoint
+        const request = {
+            path: '/v1/reporting/balances?as_of_time=' + new Date().toISOString(),
+            verb: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + accessTokenResponse.result.access_token
+            }
+        };
+
+        try {
+            const balanceResponse = await paypalClient.execute(request);
+            
+            res.json({
+                success: true,
+                environment: paypalClient.environment.constructor.name,
+                baseUrl: paypalClient.environment.baseUrl,
+                balances: balanceResponse.result.balances || balanceResponse.result,
+                message: 'Balance retrieved successfully'
+            });
+        } catch (balanceError) {
+            // Balance API might not be available, return what we can
+            res.json({
+                success: false,
+                environment: paypalClient.environment.constructor.name,
+                baseUrl: paypalClient.environment.baseUrl,
+                error: 'Balance API not available or not authorized',
+                message: 'Please check balance manually in PayPal dashboard',
+                errorDetails: balanceError.message,
+                dashboardUrl: paypalClient.environment.constructor.name === 'SandboxEnvironment' 
+                    ? 'https://www.sandbox.paypal.com' 
+                    : 'https://www.paypal.com/businesswallet'
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ Error checking balance:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            details: 'Failed to check PayPal balance'
+        });
+    }
+});
+
+app.get('/api/admin/paypal-app-permissions', cors(corsOptions), async (req, res) => {
+    try {
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        
+        // Decode the access token to see scopes
+        const token = accessTokenResponse.result.access_token;
+        const scopes = accessTokenResponse.result.scope ? accessTokenResponse.result.scope.split(' ') : [];
+        
+        res.json({
+            success: true,
+            environment: paypalClient.environment.constructor.name,
+            clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 20) + '...',
+            scopes: scopes,
+            hasPayoutsScope: scopes.includes('https://api.paypal.com/v1/payments/payouts'),
+            message: 'Check if Payouts scope is present',
+            needsPayouts: !scopes.includes('https://api.paypal.com/v1/payments/payouts'),
+            instructions: !scopes.includes('https://api.paypal.com/v1/payments/payouts') 
+                ? 'Go to developer.paypal.com/dashboard, select your app, and enable Payouts feature'
+                : 'Payouts is enabled'
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.get('/api/admin/paypal-full-diagnostics', cors(corsOptions), async (req, res) => {
+    try {
+        console.log('🔍 Running full PayPal diagnostics...');
+        
+        // Get access token
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        const accessToken = accessTokenResponse.result.access_token;
+        
+        console.log('✅ Access token obtained');
+        
+        const diagnostics = {
+            environment: paypalClient.environment.constructor.name,
+            baseUrl: paypalClient.environment.baseUrl,
+            mode: process.env.PAYPAL_MODE || 'not-set',
+            clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 25) + '...',
+            scopes: accessTokenResponse.result.scope.split(' '),
+            tests: {}
+        };
+        
+        // Test 1: Try to get user info (shows which account is connected)
+        try {
+            const fetch = require('node-fetch');
+            
+            const userInfoResponse = await fetch(`${paypalClient.environment.baseUrl}/v1/identity/oauth2/userinfo?schema=paypalv1.1`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (userInfoResponse.ok) {
+                const userInfo = await userInfoResponse.json();
+                diagnostics.tests.accountInfo = {
+                    success: true,
+                    accountId: userInfo.account_id || userInfo.payer_id || 'N/A',
+                    email: userInfo.email || 'N/A',
+                    verified: userInfo.verified_account || 'N/A',
+                    accountType: userInfo.account_type || 'N/A',
+                    name: userInfo.name || 'N/A'
+                };
+            } else {
+                diagnostics.tests.accountInfo = {
+                    success: false,
+                    error: 'Cannot retrieve account info',
+                    status: userInfoResponse.status
+                };
+            }
+        } catch (error) {
+            diagnostics.tests.accountInfo = {
+                success: false,
+                error: error.message
+            };
+        }
+        
+        // Test 2: Try Balance API
+        try {
+            const fetch = require('node-fetch');
+            
+            const balanceResponse = await fetch(`${paypalClient.environment.baseUrl}/v1/reporting/balances?as_of_time=${new Date().toISOString()}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (balanceResponse.ok) {
+                const balanceData = await balanceResponse.json();
+                diagnostics.tests.balance = {
+                    success: true,
+                    data: balanceData
+                };
+            } else {
+                const errorData = await balanceResponse.json();
+                diagnostics.tests.balance = {
+                    success: false,
+                    status: balanceResponse.status,
+                    error: errorData,
+                    reason: 'Balance API requires additional permissions. Apply at: https://developer.paypal.com/dashboard'
+                };
+            }
+        } catch (error) {
+            diagnostics.tests.balance = {
+                success: false,
+                error: error.message
+            };
+        }
+        
+        // Test 3: Try Wallet API
+        try {
+            const fetch = require('node-fetch');
+            
+            const walletResponse = await fetch(`${paypalClient.environment.baseUrl}/v1/wallet`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (walletResponse.ok) {
+                const walletData = await walletResponse.json();
+                diagnostics.tests.wallet = {
+                    success: true,
+                    data: walletData
+                };
+            } else {
+                const errorData = await walletResponse.json();
+                diagnostics.tests.wallet = {
+                    success: false,
+                    status: walletResponse.status,
+                    error: errorData
+                };
+            }
+        } catch (error) {
+            diagnostics.tests.wallet = {
+                success: false,
+                error: error.message
+            };
+        }
+        
+        // Test 4: Check Payout permissions specifically
+        try {
+            const fetch = require('node-fetch');
+            
+            // Try to get payout batch status (this will fail but show us the error)
+            const payoutTestResponse = await fetch(`${paypalClient.environment.baseUrl}/v1/payments/payouts?page_size=1`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (payoutTestResponse.ok) {
+                const payoutData = await payoutTestResponse.json();
+                diagnostics.tests.payoutsHistory = {
+                    success: true,
+                    recentPayouts: payoutData.items?.length || 0,
+                    data: payoutData
+                };
+            } else {
+                const errorData = await payoutTestResponse.json();
+                diagnostics.tests.payoutsHistory = {
+                    success: false,
+                    status: payoutTestResponse.status,
+                    error: errorData
+                };
+            }
+        } catch (error) {
+            diagnostics.tests.payoutsHistory = {
+                success: false,
+                error: error.message
+            };
+        }
+        
+        console.log('✅ Diagnostics complete');
+        
+        res.json({
+            success: true,
+            diagnostics: diagnostics,
+            summary: {
+                connectedAccount: diagnostics.tests.accountInfo?.email || 'Unknown',
+                canCheckBalance: diagnostics.tests.balance?.success || false,
+                canMakePayouts: diagnostics.scopes.includes('https://uri.paypal.com/payments/payouts'),
+                balanceCheckUrl: 'https://www.paypal.com/businesswallet/currencies',
+                recommendation: !diagnostics.tests.balance?.success 
+                    ? 'Balance API requires special permission. Check balance manually in PayPal dashboard.'
+                    : 'Balance API is working'
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Diagnostics failed:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            details: 'Failed to run diagnostics'
+        });
+    }
+});
+
+app.get('/api/admin/paypal-account-identity', cors(corsOptions), async (req, res) => {
+    try {
+        // Get access token
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        
+        // Try to get user info using PayPal SDK
+        const request = {
+            path: '/v1/identity/oauth2/userinfo?schema=paypalv1.1',
+            verb: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + accessTokenResponse.result.access_token
+            }
+        };
+        
+        try {
+            const response = await paypalClient.execute(request);
+            
+            res.json({
+                success: true,
+                environment: paypalClient.environment.constructor.name,
+                connectedAccount: {
+                    email: response.result.email || 'N/A',
+                    accountId: response.result.account_id || response.result.payer_id || 'N/A',
+                    verified: response.result.verified_account || 'N/A',
+                    accountType: response.result.account_type || 'N/A',
+                    name: response.result.name || 'N/A'
+                },
+                instructions: 'This is the PayPal account your API credentials are connected to',
+                checkBalanceAt: 'https://www.paypal.com/businesswallet/currencies'
+            });
+        } catch (identityError) {
+            res.json({
+                success: false,
+                error: 'Cannot retrieve account identity',
+                errorDetails: identityError.message || JSON.stringify(identityError),
+                environment: paypalClient.environment.constructor.name,
+                clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 25) + '...',
+                note: 'Identity API might require openid scope',
+                checkManually: 'Log into PayPal dashboard to verify which account these credentials belong to'
+            });
+        }
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Add this test endpoint
+app.post('/api/admin/test-mini-payout', cors(corsOptions), async (req, res) => {
+    const { currency, amount } = req.body;
+    
+    try {
+        const payoutId = `test_mini_${Date.now()}`;
+        
+        console.log('🧪 Testing mini payout...');
+        console.log('Currency:', currency);
+        console.log('Amount:', amount);
+        
+        const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+        payoutRequest.requestBody({
+            sender_batch_header: {
+                sender_batch_id: payoutId,
+                email_subject: "Test Payout - Ignore",
+                email_message: "This is a test payout"
+            },
+            items: [{
+                recipient_type: "EMAIL",
+                amount: {
+                    value: parseFloat(amount).toFixed(2),
+                    currency: currency
+                },
+                receiver: "sumi.shreegopal@gmail.com", // Your test email
+                sender_item_id: payoutId
+            }]
+        });
+        
+        console.log('📤 Request:', JSON.stringify(payoutRequest.requestBody(), null, 2));
+        
+        const response = await paypalClient.execute(payoutRequest);
+        
+        console.log('✅ PayPal Response:', JSON.stringify(response.result, null, 2));
+        
+        res.json({
+            success: true,
+            message: 'Test payout sent successfully!',
+            batchId: response.result.batch_header.payout_batch_id,
+            status: response.result.batch_header.batch_status,
+            currency: currency,
+            amount: amount,
+            note: 'Check the PayPal account for this payout'
+        });
+        
+    } catch (error) {
+        console.error('❌ Test payout failed:', error);
+        
+        res.json({
+            success: false,
+            error: error.message,
+            errorName: error.name,
+            statusCode: error.statusCode,
+            details: error._originalError?.text ? JSON.parse(error._originalError.text) : 'No details',
+            recommendation: error.name === 'INSUFFICIENT_FUNDS' 
+                ? `Your PayPal account doesn't have enough ${currency}. Check: https://www.paypal.com/businesswallet/currencies`
+                : 'Check error details above'
+        });
+    }
+});
+
+app.post('/api/admin/test-mini-payout', cors(corsOptions), async (req, res) => {
+    const { currency, amount } = req.body;
+    
+    try {
+        const payoutId = `test_mini_${Date.now()}`;
+        
+        console.log('🧪 Testing mini payout...');
+        console.log('Currency:', currency);
+        console.log('Amount:', amount);
+        
+        const requestBody = {
+            sender_batch_header: {
+                sender_batch_id: payoutId,
+                email_subject: "Test Payout - Ignore",
+                email_message: "This is a test payout"
+            },
+            items: [{
+                recipient_type: "EMAIL",
+                amount: {
+                    value: parseFloat(amount).toFixed(2),
+                    currency: currency
+                },
+                receiver: "sumi.shreegopal@gmail.com",
+                sender_item_id: payoutId
+            }]
+        };
+        
+        console.log('📤 Request Body:', JSON.stringify(requestBody, null, 2));
+        
+        // ✅ Use this pattern (same as in your actual payout code)
+        const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+        payoutRequest.prefer("return=representation");
+        payoutRequest.requestBody(requestBody);
+        
+        const response = await paypalClient.execute(payoutRequest);
+        
+        console.log('✅ PayPal Response:', JSON.stringify(response.result, null, 2));
+        
+        res.json({
+            success: true,
+            message: 'Test payout sent successfully!',
+            batchId: response.result.batch_header.payout_batch_id,
+            status: response.result.batch_header.batch_status,
+            currency: currency,
+            amount: amount,
+            response: response.result
+        });
+        
+    } catch (error) {
+        console.error('❌ Test payout failed:', error);
+        console.error('Error details:', JSON.stringify(error, null, 2));
+        
+        const errorDetails = error._originalError?.text 
+            ? JSON.parse(error._originalError.text) 
+            : { message: error.message };
+        
+        res.json({
+            success: false,
+            error: error.message,
+            errorName: error.name,
+            statusCode: error.statusCode,
+            details: errorDetails,
+            fullError: error.toString()
+        });
+    }
+});
 
 app.get('/api/paypal/:walletAddress/cumulative-breakdown', cors(corsOptions), async (req, res) => {
 	try {
