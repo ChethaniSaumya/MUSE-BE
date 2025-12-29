@@ -11,7 +11,7 @@ const axios = require('axios');
 const archiver = require('archiver');
 const app = express();
 const Web3 = require('web3');
-const web3 = new Web3(new Web3.providers.HttpProvider('https://mainnet.infura.io/v3/3be51d7b768d4d9db4a09e8c24b94cff'));
+const web3 = new Web3(new Web3.providers.HttpProvider('https://polygon-mainnet.infura.io/v3/3be51d7b768d4d9db4a09e8c24b94cff'));
 const nodemailer = require('nodemailer');
 const paypal = require('@paypal/checkout-server-sdk');
 const payoutsSDK = require('@paypal/payouts-sdk')
@@ -3597,7 +3597,7 @@ const calculateUserPayout = async (userData) => {
 		// Fallback if contract call fails
 		if (totalSupply <= 0) {
 			console.warn('⚠️ Total supply is 0 or contract call failed, using fallback');
-			totalSupply = Math.max(userNFTsOwned, 1);
+			totalSupply = userNFTsOwned;
 			console.log('📊 Using fallback total supply:', totalSupply);
 		}
 
@@ -4599,7 +4599,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 
 		res.json({
 			success: true,
-			message: `Withdrawal request of $${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
+			message: `Withdrawal request of £${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
 			payoutId: payoutId,
 			amount: withdrawAmount,
 			remainingBalance: availableAmount - withdrawAmount,
@@ -5591,7 +5591,7 @@ app.post('/api/users/:email/request-payout', cors(corsOptions), async (req, res)
 					recipient_type: "EMAIL",
 					amount: {
 						value: payoutInfo.availablePayout.toFixed(2),
-						currency: "USD"
+						currency: "GBP"
 					},
 					receiver: userData.paypalEmail,
 					note: `Hope KK NFT Royalty Payout - ${userData.totalMinted} NFTs owned`,
@@ -6291,11 +6291,11 @@ const sendPayoutConfirmationEmail = async (userEmail, userName, amount) => {
 			  
 			  <p>Great news! Your Hope KK NFT royalty payout is now being processed.</p>
 			  
-			  <div class="amount">$${amount.toFixed(2)} USD</div>
+			  <div class="amount">£${amount.toFixed(2)} GBP</div>
 			  
 			  <div class="payout-info">
 				<h3>📋 Payout Details:</h3>
-				<p><strong>Amount:</strong> $${amount.toFixed(2)} USD</p>
+				<p><strong>Amount:</strong> £${amount.toFixed(2)} GBP</p>
 				<p><strong>Status:</strong> Processing</p>
 				<p><strong>Estimated Arrival:</strong> 1-3 business days</p>
 			  </div>
@@ -6498,7 +6498,7 @@ app.post('/api/test-paypal-payout', cors(corsOptions), async (req, res) => {
 				recipient_type: "EMAIL",
 				amount: {
 					value: payoutAmount.toFixed(2),
-					currency: "USD"
+					currency: "GBP"
 				},
 				receiver: recipientEmail,
 				note: `Test payout - Amount: $${payoutAmount.toFixed(2)}`,
@@ -8231,6 +8231,259 @@ app.patch('/api/admin/artist-projects/:projectId/toggle-minting', cors(corsOptio
 			details: error.message
 		});
 	}
+});
+
+app.get('/api/admin/paypal-check-account', cors(corsOptions), async (req, res) => {
+    try {
+        console.log('🔍 Checking PayPal account connection...');
+        
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        
+        console.log('✅ Access token obtained');
+        console.log('Environment:', paypalClient.environment.constructor.name);
+        console.log('Base URL:', paypalClient.environment.baseUrl);
+        
+        // Get account info
+        const request = {
+            path: '/v1/identity/oauth2/userinfo?schema=paypalv1.1',
+            verb: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + accessTokenResponse.result.access_token
+            }
+        };
+        
+        try {
+            const response = await paypalClient.execute(request);
+            
+            res.json({
+                success: true,
+                environment: paypalClient.environment.constructor.name,
+                baseUrl: paypalClient.environment.baseUrl,
+                connectedAccount: {
+                    email: response.result.email || 'N/A',
+                    userId: response.result.user_id || 'N/A',
+                    accountId: response.result.account_id || 'N/A',
+                    name: response.result.name || 'N/A'
+                },
+                clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 30) + '...',
+                message: 'This is the PayPal account your API credentials are connected to',
+                instructions: [
+                    '1. Verify this email matches the account with £36.48 balance',
+                    '2. Go to https://developer.paypal.com/dashboard',
+                    '3. Select your app: MyApp_Wix_com_Ltd',
+                    '4. Scroll to "App feature options" section',
+                    '5. Make sure "Payouts" checkbox is CHECKED',
+                    '6. Click "Save" if you made any changes',
+                    '7. Wait 2-3 minutes for changes to take effect'
+                ],
+                checkBalanceAt: paypalClient.environment.constructor.name === 'SandboxEnvironment' 
+                    ? 'https://www.sandbox.paypal.com/businesswallet/currencies'
+                    : 'https://www.paypal.com/businesswallet/currencies'
+            });
+        } catch (identityError) {
+            res.json({
+                success: false,
+                error: 'Cannot retrieve account identity',
+                environment: paypalClient.environment.constructor.name,
+                baseUrl: paypalClient.environment.baseUrl,
+                clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 30) + '...',
+                note: 'This is normal - identity API requires special permissions',
+                instructions: [
+                    '1. Go to https://developer.paypal.com/dashboard',
+                    '2. Select your app: MyApp_Wix_com_Ltd', 
+                    '3. Check which email is shown at the top of the page',
+                    '4. Make sure "Payouts" feature is enabled (see App feature options)',
+                    '5. Verify that account has GBP balance'
+                ],
+                checkManually: 'Log into PayPal to verify which account these credentials belong to'
+            });
+        }
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 30) + '...'
+        });
+    }
+});
+
+app.get('/api/admin/paypal-check-permissions', cors(corsOptions), async (req, res) => {
+    try {
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        
+        const token = accessTokenResponse.result.access_token;
+        const scopes = accessTokenResponse.result.scope ? accessTokenResponse.result.scope.split(' ') : [];
+        
+        const hasPayoutsScope = scopes.includes('https://uri.paypal.com/services/payments/payouts') || 
+                                scopes.includes('https://api.paypal.com/v1/payments/payouts');
+        
+        res.json({
+            success: true,
+            environment: paypalClient.environment.constructor.name,
+            scopes: scopes,
+            hasPayoutsPermission: hasPayoutsScope,
+            status: hasPayoutsScope ? '✅ Payouts is ENABLED' : '❌ Payouts is NOT ENABLED',
+            instructions: !hasPayoutsScope ? [
+                '⚠️ CRITICAL: Payouts feature is NOT enabled!',
+                '',
+                'To fix this:',
+                '1. Go to https://developer.paypal.com/dashboard',
+                '2. Click on your app: MyApp_Wix_com_Ltd',
+                '3. Scroll down to "App feature options"',
+                '4. CHECK the "Payouts" checkbox',
+                '5. Click "Save"',
+                '6. Wait 2-3 minutes',
+                '7. Restart your server',
+                '8. Try the payout again'
+            ] : [
+                '✅ Payouts feature is properly enabled',
+                'The issue might be:',
+                '- Currency mismatch (check if account has GBP balance)',
+                '- Wrong account (verify API credentials connect to correct account)',
+                '- Account limitations (contact PayPal support)'
+            ]
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/admin/test-payout-with-diagnostics', cors(corsOptions), async (req, res) => {
+    try {
+        const payoutId = `diag_${Date.now()}`;
+        
+        console.log('🧪 Testing payout with full diagnostics...');
+        console.log('Environment:', paypalClient.environment.constructor.name);
+        console.log('Base URL:', paypalClient.environment.baseUrl);
+        console.log('Client ID:', process.env.PAYPAL_CLIENT_ID?.substring(0, 30) + '...');
+        
+        // First check permissions
+        const accessTokenRequest = new paypal.core.AccessTokenRequest(paypalClient.environment);
+        const accessTokenResponse = await paypalClient.execute(accessTokenRequest);
+        const scopes = accessTokenResponse.result.scope ? accessTokenResponse.result.scope.split(' ') : [];
+        
+        console.log('📋 Scopes:', scopes);
+        
+        const hasPayouts = scopes.includes('https://uri.paypal.com/services/payments/payouts') || 
+                          scopes.includes('https://api.paypal.com/v1/payments/payouts');
+        
+        if (!hasPayouts) {
+            return res.json({
+                success: false,
+                error: 'PAYOUTS_NOT_ENABLED',
+                message: '❌ Payouts feature is not enabled in your PayPal app',
+                instructions: [
+                    '1. Go to https://developer.paypal.com/dashboard',
+                    '2. Select your app',
+                    '3. Enable "Payouts" in App feature options',
+                    '4. Save and wait 2-3 minutes'
+                ]
+            });
+        }
+        
+        // Try the payout
+        const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+        payoutRequest.requestBody({
+            sender_batch_header: {
+                sender_batch_id: payoutId,
+                email_subject: "Test Diagnostic Payout",
+                email_message: "Testing payout system"
+            },
+            items: [{
+                recipient_type: "EMAIL",
+                amount: {
+                    value: "1.00",
+                    currency: "GBP"  // Using GBP to match your account
+                },
+                receiver: "sumi.shreegopal@gmail.com",
+                sender_item_id: payoutId
+            }]
+        });
+        
+        console.log('📤 Sending test payout for £1.00 GBP...');
+        
+        const response = await paypalClient.execute(payoutRequest);
+        
+        console.log('✅ Payout successful!');
+        console.log('Batch ID:', response.result.batch_header.payout_batch_id);
+        console.log('Status:', response.result.batch_header.batch_status);
+        
+        res.json({
+            success: true,
+            message: '✅ Test payout successful! Your system is working correctly.',
+            batchId: response.result.batch_header.payout_batch_id,
+            status: response.result.batch_header.batch_status,
+            amount: '1.00 GBP',
+            environment: paypalClient.environment.constructor.name,
+            recommendation: 'The system is working. Try your actual payout again.'
+        });
+        
+    } catch (error) {
+        console.error('❌ Test payout failed:', error);
+        
+        let errorDetails = {};
+        try {
+            errorDetails = error._originalError?.text ? JSON.parse(error._originalError.text) : {};
+        } catch (e) {
+            errorDetails = { raw: error._originalError?.text || 'No details' };
+        }
+        
+        const errorName = errorDetails.name || error.name || 'UNKNOWN_ERROR';
+        
+        // Provide specific guidance based on error
+        let guidance = [];
+        if (errorName === 'INSUFFICIENT_FUNDS') {
+            guidance = [
+                '❌ INSUFFICIENT_FUNDS error detected',
+                '',
+                'This usually means:',
+                '1. API credentials are connected to a DIFFERENT PayPal account',
+                '   → The account with £36.48 might not be the one used by the API',
+                '',
+                '2. OR: The account doesn\'t have GBP balance',
+                '   → Check https://www.paypal.com/businesswallet/currencies',
+                '   → You might need to hold balance in GBP specifically',
+                '',
+                '3. OR: Payouts feature needs to be enabled',
+                '   → Go to https://developer.paypal.com/dashboard',
+                '   → Select MyApp_Wix_com_Ltd',
+                '   → Enable "Payouts" in App feature options',
+                '',
+                'To verify which account is connected:',
+                '→ Call /api/admin/paypal-check-account endpoint'
+            ];
+        } else {
+            guidance = [
+                `Error: ${errorName}`,
+                'Message: ' + (errorDetails.message || error.message || 'Unknown error'),
+                '',
+                'Check:',
+                '1. PayPal account has sufficient GBP balance',
+                '2. Payouts feature is enabled in app settings',
+                '3. API credentials are for LIVE mode (not sandbox)',
+                '4. Contact PayPal support if issue persists'
+            ];
+        }
+        
+        res.json({
+            success: false,
+            error: errorName,
+            message: errorDetails.message || error.message,
+            statusCode: error.statusCode,
+            details: errorDetails,
+            environment: paypalClient.environment.constructor.name,
+            clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 30) + '...',
+            guidance: guidance
+        });
+    }
 });
 
 // DEBUG ENDPOINT - Test database connection
