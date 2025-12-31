@@ -4760,10 +4760,10 @@ app.get('/api/admin/paypal-app-permissions', cors(corsOptions), async (req, res)
             environment: paypalClient.environment.constructor.name,
             clientId: process.env.PAYPAL_CLIENT_ID?.substring(0, 20) + '...',
             scopes: scopes,
-            hasPayoutsScope: scopes.includes('https://api.paypal.com/v1/payments/payouts'),
+            hasPayoutsScope: scopes.includes('https://uri.paypal.com/payments/payouts'),
             message: 'Check if Payouts scope is present',
-            needsPayouts: !scopes.includes('https://api.paypal.com/v1/payments/payouts'),
-            instructions: !scopes.includes('https://api.paypal.com/v1/payments/payouts') 
+            needsPayouts: !scopes.includes('https://uri.paypal.com/payments/payouts'),
+            instructions: !scopes.includes('https://uri.paypal.com/payments/payouts') 
                 ? 'Go to developer.paypal.com/dashboard, select your app, and enable Payouts feature'
                 : 'Payouts is enabled'
         });
@@ -8319,7 +8319,7 @@ app.get('/api/admin/paypal-check-permissions', cors(corsOptions), async (req, re
         const scopes = accessTokenResponse.result.scope ? accessTokenResponse.result.scope.split(' ') : [];
         
         const hasPayoutsScope = scopes.includes('https://uri.paypal.com/services/payments/payouts') || 
-                                scopes.includes('https://api.paypal.com/v1/payments/payouts');
+                                scopes.includes('https://uri.paypal.com/payments/payouts');
         
         res.json({
             success: true,
@@ -8373,7 +8373,7 @@ app.post('/api/admin/test-payout-with-diagnostics', cors(corsOptions), async (re
         console.log('📋 Scopes:', scopes);
         
         const hasPayouts = scopes.includes('https://uri.paypal.com/services/payments/payouts') || 
-                          scopes.includes('https://api.paypal.com/v1/payments/payouts');
+                          scopes.includes('https://uri.paypal.com/payments/payouts');
         
         if (!hasPayouts) {
             return res.json({
