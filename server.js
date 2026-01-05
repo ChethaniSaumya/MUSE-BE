@@ -4550,7 +4550,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 				recipient_type: "EMAIL",
 				amount: {
 					value: withdrawAmount.toFixed(2),
-					currency: "GBP"
+					currency: "USD"
 				},
 				receiver: paypalData.paypalEmail,
 				sender_item_id: payoutId
@@ -4599,7 +4599,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 
 		res.json({
 			success: true,
-			message: `Withdrawal request of £${withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
+			message: `Withdrawal request of $${ withdrawAmount.toFixed(2)} has been submitted and is being processed. You will be notified once completed.`,
 			payoutId: payoutId,
 			amount: withdrawAmount,
 			remainingBalance: availableAmount - withdrawAmount,
@@ -4647,7 +4647,7 @@ app.post('/api/admin/test-mini-payout-v2', cors(corsOptions), async (req, res) =
                 recipient_type: "EMAIL",
                 amount: {
                     value: parseFloat(amount || '1.00').toFixed(2),
-                    currency: currency || "GBP"
+                    currency: currency || "USD"
                 },
                 receiver: "sumi.shreegopal@gmail.com",
                 sender_item_id: payoutId
@@ -5591,7 +5591,7 @@ app.post('/api/users/:email/request-payout', cors(corsOptions), async (req, res)
 					recipient_type: "EMAIL",
 					amount: {
 						value: payoutInfo.availablePayout.toFixed(2),
-						currency: "GBP"
+						currency: "USD"
 					},
 					receiver: userData.paypalEmail,
 					note: `Hope KK NFT Royalty Payout - ${userData.totalMinted} NFTs owned`,
@@ -6291,11 +6291,11 @@ const sendPayoutConfirmationEmail = async (userEmail, userName, amount) => {
 			  
 			  <p>Great news! Your Hope KK NFT royalty payout is now being processed.</p>
 			  
-			  <div class="amount">£${amount.toFixed(2)} GBP</div>
+			  <div class="amount">$${ amount.toFixed(2)} USD</div>
 			  
 			  <div class="payout-info">
 				<h3>📋 Payout Details:</h3>
-				<p><strong>Amount:</strong> £${amount.toFixed(2)} GBP</p>
+				<p><strong>Amount:</strong> $${ amount.toFixed(2)} USD</p>
 				<p><strong>Status:</strong> Processing</p>
 				<p><strong>Estimated Arrival:</strong> 1-3 business days</p>
 			  </div>
@@ -6498,7 +6498,7 @@ app.post('/api/test-paypal-payout', cors(corsOptions), async (req, res) => {
 				recipient_type: "EMAIL",
 				amount: {
 					value: payoutAmount.toFixed(2),
-					currency: "GBP"
+					currency: "USD"
 				},
 				receiver: recipientEmail,
 				note: `Test payout - Amount: $${payoutAmount.toFixed(2)}`,
@@ -8401,7 +8401,7 @@ app.post('/api/admin/test-payout-with-diagnostics', cors(corsOptions), async (re
                 recipient_type: "EMAIL",
                 amount: {
                     value: "1.00",
-                    currency: "GBP"  // Using GBP to match your account
+                    currency: "USD"  // Using GBP to match your account
                 },
                 receiver: "sumi.shreegopal@gmail.com",
                 sender_item_id: payoutId
