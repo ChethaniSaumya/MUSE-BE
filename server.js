@@ -8597,6 +8597,56 @@ app.post('/api/artists/check-project-symbol', cors(corsOptions), async (req, res
 	}
 });
 
+// Delete artist project - Admin only
+app.delete('/api/admin/artist-projects/:projectId', cors(corsOptions), async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    console.log(`🗑️ Deleting artist project: ${projectId}`);
+
+    // Get project first to verify it exists
+    const projectDoc = await db.collection('artist_projects').doc(projectId).get();
+
+    if (!projectDoc.exists) {
+      console.log('❌ Project not found:', projectId);
+      return res.status(404).json({
+        error: 'Project not found'
+      });
+    }
+
+    const projectData = projectDoc.data();
+    console.log(`📋 Deleting project: ${projectData.projectName} by ${projectData.artistName}`);
+
+    // Delete from database
+    await db.collection('artist_projects').doc(projectId).delete();
+
+    // Log the deletion for audit trail
+    await db.collection('admin_audit_log').add({
+      action: 'project_deleted',
+      projectId: projectId,
+      projectName: projectData.projectName,
+      artistName: projectData.artistName,
+      artistEmail: projectData.artistEmail,
+      deletedAt: new Date().toISOString(),
+      deletedBy: 'admin'
+    });
+
+    console.log(`✅ Project deleted successfully: ${projectData.projectName}`);
+
+    res.json({
+      success: true,
+      message: 'Project deleted successfully',
+      projectName: projectData.projectName
+    });
+
+  } catch (error) {
+    console.error('❌ Error deleting project:', error);
+    res.status(500).json({
+      error: 'Failed to delete project',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
 /*ARTIST DAPP SERVER ENDS*/
 
 
