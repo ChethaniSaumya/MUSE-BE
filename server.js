@@ -5518,164 +5518,164 @@ app.post('/api/admin/refresh-payout-status/:walletAddress', cors(corsOptions), a
 });
 
 app.post('/api/users/:email/request-payout', cors(corsOptions), async (req, res) => {
-  try {
-    const email = req.params.email;
-    const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+	try {
+		const email = req.params.email;
+		const docId = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
-    // Get user data
-    const userDoc = await db.collection('users').doc(docId).get();
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+		// Get user data
+		const userDoc = await db.collection('users').doc(docId).get();
+		if (!userDoc.exists) {
+			return res.status(404).json({ error: 'User not found' });
+		}
 
-    const userData = userDoc.data();
+		const userData = userDoc.data();
 
-    // ✅ GET PAYPAL EMAIL FROM PAYPAL COLLECTION
-    if (!userData.walletAddress) {
-      return res.status(400).json({
-        error: 'No wallet address found for this user.'
-      });
-    }
+		// ✅ GET PAYPAL EMAIL FROM PAYPAL COLLECTION
+		if (!userData.walletAddress) {
+			return res.status(400).json({
+				error: 'No wallet address found for this user.'
+			});
+		}
 
-    // Fetch PayPal data from paypal collection
-    const paypalDoc = await db.collection('paypal')
-      .doc(userData.walletAddress.toLowerCase())
-      .get();
+		// Fetch PayPal data from paypal collection
+		const paypalDoc = await db.collection('paypal')
+			.doc(userData.walletAddress.toLowerCase())
+			.get();
 
-    if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
-      return res.status(400).json({
-        error: 'PayPal email is required. Please add your PayPal email first.'
-      });
-    }
+		if (!paypalDoc.exists || !paypalDoc.data().paypalEmail) {
+			return res.status(400).json({
+				error: 'PayPal email is required. Please add your PayPal email first.'
+			});
+		}
 
-    const paypalData = paypalDoc.data();
-    const paypalEmail = paypalData.paypalEmail;
-    // ✅ END OF PAYPAL EMAIL FETCH
+		const paypalData = paypalDoc.data();
+		const paypalEmail = paypalData.paypalEmail;
+		// ✅ END OF PAYPAL EMAIL FETCH
 
-    // Calculate payout eligibility
-    const payoutInfo = await calculateUserPayout(userData);
+		// Calculate payout eligibility
+		const payoutInfo = await calculateUserPayout(userData);
 
-    // Check if user has enough for payout
-    if (payoutInfo.availablePayout < payoutInfo.minimumPayout) {
-      return res.status(400).json({
-        error: `Minimum payout amount is $${payoutInfo.minimumPayout}. You have $${payoutInfo.availablePayout.toFixed(2)} available.`
-      });
-    }
+		// Check if user has enough for payout
+		if (payoutInfo.availablePayout < payoutInfo.minimumPayout) {
+			return res.status(400).json({
+				error: `Minimum payout amount is $${payoutInfo.minimumPayout}. You have $${payoutInfo.availablePayout.toFixed(2)} available.`
+			});
+		}
 
-    // Check for pending payouts
-    const pendingPayouts = await db.collection('payouts')
-      .where('userEmail', '==', email)
-      .where('status', '==', 'pending')
-      .get();
+		// Check for pending payouts
+		const pendingPayouts = await db.collection('payouts')
+			.where('userEmail', '==', email)
+			.where('status', '==', 'pending')
+			.get();
 
-    if (!pendingPayouts.empty) {
-      return res.status(400).json({
-        error: 'You have a pending payout request. Please wait for it to complete.'
-      });
-    }
+		if (!pendingPayouts.empty) {
+			return res.status(400).json({
+				error: 'You have a pending payout request. Please wait for it to complete.'
+			});
+		}
 
-    // Create payout record
-    const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const payoutData = {
-      id: payoutId,
-      userEmail: email,
-      userName: userData.name,
-      paypalEmail: paypalEmail,  // ✅ Use the fetched PayPal email
-      amount: payoutInfo.availablePayout,
-      currency: 'USD',
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-      nftCount: userData.totalMinted || 0,
-      sharePercentage: payoutInfo.sharePercentage
-    };
+		// Create payout record
+		const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+		const payoutData = {
+			id: payoutId,
+			userEmail: email,
+			userName: userData.name,
+			paypalEmail: paypalEmail,  // ✅ Use the fetched PayPal email
+			amount: payoutInfo.availablePayout,
+			currency: 'USD',
+			status: 'pending',
+			createdAt: new Date().toISOString(),
+			nftCount: userData.totalMinted || 0,
+			sharePercentage: payoutInfo.sharePercentage
+		};
 
-    // Store payout request
-    await db.collection('payouts').doc(payoutId).set(payoutData);
+		// Store payout request
+		await db.collection('payouts').doc(payoutId).set(payoutData);
 
-    // Create PayPal payout
-    const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
-    payoutRequest.requestBody({
-      sender_batch_header: {
-        sender_batch_id: payoutId,
-        email_subject: "You have a payout from Hope KK NFTs!",
-        email_message: "You have received a payout from your Hope KK NFT royalties. Thank you for being part of our community!"
-      },
-      items: [
-        {
-          recipient_type: "EMAIL",
-          amount: {
-            value: payoutInfo.availablePayout.toFixed(2),
-            currency: "USD"
-          },
-          receiver: paypalEmail,  // ✅ Use the fetched PayPal email
-          note: `Hope KK NFT Royalty Payout - ${userData.totalMinted} NFTs owned`,
-          sender_item_id: payoutId
-        }
-      ]
-    });
+		// Create PayPal payout
+		const payoutRequest = new payoutsSDK.payouts.PayoutsPostRequest();
+		payoutRequest.requestBody({
+			sender_batch_header: {
+				sender_batch_id: payoutId,
+				email_subject: "You have a payout from Hope KK NFTs!",
+				email_message: "You have received a payout from your Hope KK NFT royalties. Thank you for being part of our community!"
+			},
+			items: [
+				{
+					recipient_type: "EMAIL",
+					amount: {
+						value: payoutInfo.availablePayout.toFixed(2),
+						currency: "USD"
+					},
+					receiver: paypalEmail,  // ✅ Use the fetched PayPal email
+					note: `Hope KK NFT Royalty Payout - ${userData.totalMinted} NFTs owned`,
+					sender_item_id: payoutId
+				}
+			]
+		});
 
-    // Execute PayPal payout
-    const response = await paypalClient.execute(payoutRequest);
+		// Execute PayPal payout
+		const response = await paypalClient.execute(payoutRequest);
 
-    // Update payout record with PayPal details
-    await db.collection('payouts').doc(payoutId).update({
-      paypalBatchId: response.result.batch_header.payout_batch_id,
-      paypalStatus: response.result.batch_header.batch_status,
-      paypalResponse: response.result,
-      updatedAt: new Date().toISOString()
-    });
+		// Update payout record with PayPal details
+		await db.collection('payouts').doc(payoutId).update({
+			paypalBatchId: response.result.batch_header.payout_batch_id,
+			paypalStatus: response.result.batch_header.batch_status,
+			paypalResponse: response.result,
+			updatedAt: new Date().toISOString()
+		});
 
-    // ✅✅✅ UPDATED SECTION - Send confirmation to BOTH emails ✅✅✅
-    try {
-      const userEmail = userData.email;  // From users collection
-      
-      console.log('📧 Sending payout confirmation emails...');
-      console.log('User email (users collection):', userEmail);
-      console.log('PayPal email (paypal collection):', paypalEmail);
-      
-      // Always send to user's main email
-      await sendPayoutConfirmationEmail(userEmail, userData.name, payoutInfo.availablePayout);
-      console.log('✅ Confirmation sent to user email:', userEmail);
-      
-      // Send to PayPal email ONLY if it's different from user email
-      if (paypalEmail && paypalEmail.toLowerCase() !== userEmail.toLowerCase()) {
-        await sendPayoutConfirmationEmail(paypalEmail, userData.name, payoutInfo.availablePayout);
-        console.log('✅ Confirmation also sent to PayPal email:', paypalEmail);
-      } else {
-        console.log('ℹ️ PayPal email same as user email, single email sent');
-      }
-      
-    } catch (emailError) {
-      console.error('❌ Failed to send payout confirmation email:', emailError);
-      // Don't fail the payout just because email failed
-    }
-    // ✅✅✅ END OF UPDATED SECTION ✅✅✅
+		// ✅✅✅ UPDATED SECTION - Send confirmation to BOTH emails ✅✅✅
+		try {
+			const userEmail = userData.email;  // From users collection
 
-    res.json({
-      success: true,
-      message: 'Payout request submitted successfully!',
-      payoutId: payoutId,
-      amount: payoutInfo.availablePayout,
-      paypalBatchId: response.result.batch_header.payout_batch_id
-    });
+			console.log('📧 Sending payout confirmation emails...');
+			console.log('User email (users collection):', userEmail);
+			console.log('PayPal email (paypal collection):', paypalEmail);
 
-  } catch (error) {
-    console.error('Error processing payout:', error);
+			// Always send to user's main email
+			await sendPayoutConfirmationEmail(userEmail, userData.name, payoutInfo.availablePayout);
+			console.log('✅ Confirmation sent to user email:', userEmail);
 
-    // Update payout status to failed if it was created
-    if (error.payoutId) {
-      await db.collection('payouts').doc(error.payoutId).update({
-        status: 'failed',
-        errorMessage: error.message,
-        updatedAt: new Date().toISOString()
-      });
-    }
+			// Send to PayPal email ONLY if it's different from user email
+			if (paypalEmail && paypalEmail.toLowerCase() !== userEmail.toLowerCase()) {
+				await sendPayoutConfirmationEmail(paypalEmail, userData.name, payoutInfo.availablePayout);
+				console.log('✅ Confirmation also sent to PayPal email:', paypalEmail);
+			} else {
+				console.log('ℹ️ PayPal email same as user email, single email sent');
+			}
 
-    res.status(500).json({
-      error: 'Failed to process payout request',
-      details: error.message
-    });
-  }
+		} catch (emailError) {
+			console.error('❌ Failed to send payout confirmation email:', emailError);
+			// Don't fail the payout just because email failed
+		}
+		// ✅✅✅ END OF UPDATED SECTION ✅✅✅
+
+		res.json({
+			success: true,
+			message: 'Payout request submitted successfully!',
+			payoutId: payoutId,
+			amount: payoutInfo.availablePayout,
+			paypalBatchId: response.result.batch_header.payout_batch_id
+		});
+
+	} catch (error) {
+		console.error('Error processing payout:', error);
+
+		// Update payout status to failed if it was created
+		if (error.payoutId) {
+			await db.collection('payouts').doc(error.payoutId).update({
+				status: 'failed',
+				errorMessage: error.message,
+				updatedAt: new Date().toISOString()
+			});
+		}
+
+		res.status(500).json({
+			error: 'Failed to process payout request',
+			details: error.message
+		});
+	}
 });
 
 // Add this function to run every hour
@@ -7270,7 +7270,7 @@ app.post('/api/artists/create-project', cors(corsOptions), async (req, res) => {
 	let tempImagePath = null;
 
 	try {
-		const { artistId, projectName, projectSymbol, totalSupply, mintPrice, contractOwner, image } = req.body;
+		const { artistId, projectName, projectSymbol, totalSupply, mintPrice, contractOwner, royalties, image } = req.body;
 
 		console.log('🎨 Creating project for artist:', artistId);
 		console.log('📊 Project details:', {
@@ -7350,6 +7350,14 @@ app.post('/api/artists/create-project', cors(corsOptions), async (req, res) => {
 		if (price > 10000) {
 			return res.status(400).json({
 				error: 'Mint price cannot exceed $10,000'
+			});
+		}
+
+		// Validate royalties
+		const royaltyValue = parseFloat(royalties);
+		if (isNaN(royaltyValue) || royaltyValue < 0 || royaltyValue > 100) {
+			return res.status(400).json({
+				error: 'Royalties must be between 0 and 100%'
 			});
 		}
 
@@ -7450,6 +7458,7 @@ app.post('/api/artists/create-project', cors(corsOptions), async (req, res) => {
 			totalSupply: supply,
 			mintPrice: price,
 			contractOwner: contractOwner.trim(),
+			royalties: royaltyValue,
 			imageIpfsUrl: imageIpfsData?.ipfsUrl || null,
 			imageIpfsHash: imageIpfsData?.ipfsHash || null,
 			status: 'pending',
