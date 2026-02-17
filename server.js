@@ -7104,18 +7104,18 @@ app.post('/api/artists/register', cors(corsOptions), async (req, res) => {
 			});
 		}
 
-		// Validate name length
-		if (name.length > 15) {
-			return res.status(400).json({
-				error: 'Name must be 15 characters or less'
-			});
-		}
+		// NEW
+if (name.length < 10) {
+    return res.status(400).json({
+        error: 'Name must be at least 10 characters'
+    });
+}
 
-		if (name.length < 2) {
-			return res.status(400).json({
-				error: 'Name must be at least 2 characters'
-			});
-		}
+if (name.length > 30) {
+    return res.status(400).json({
+        error: 'Name must be 30 characters or less'
+    });
+}
 
 		// Validate email format
 		const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
