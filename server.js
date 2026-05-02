@@ -2008,7 +2008,8 @@ app.get('/api/payout-limits/current', cors(corsOptions), async (req, res) => {
 		res.json({
 			totalLimit: data.totalLimit || 0,
 			remainingLimit: remainingLimit,
-			isActive: remainingLimit > 0
+			isActive: remainingLimit > 0,
+			disbursementId: data.disbursementId || null
 		});
 	} catch (error) {
 		console.error('Error fetching current payout limits:', error);
@@ -3700,24 +3701,23 @@ const calculateUserPayout = async (userData) => {
 				inactiveCount++;
 			}
 
-			// ✅ ONLY calculate earnings for ACTIVE disbursements
-			let earnedFromThis = 0;
+			// Calculate earnings for ALL disbursements (including expired ones) 
+			// to ensure the cumulative balance correctly offsets all-time withdrawals.
+			const earnedFromThis = disbursementAmount * sharePercentage;
+			const previousBalance = cumulativeBalance;
+			cumulativeBalance += earnedFromThis;
+			totalEligible = cumulativeBalance;
+
 			if (isActive) {
-				earnedFromThis = disbursementAmount * sharePercentage;
-
-				// ✅ CUMULATIVE ADDITION - Only from active disbursements
-				const previousBalance = cumulativeBalance;
-				cumulativeBalance += earnedFromThis;
-				totalEligible = cumulativeBalance;
-
 				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [ACTIVE]`);
 				console.log(`   Amount: $${disbursementAmount}`);
 				console.log(`   Earned: $${earnedFromThis.toFixed(2)}`);
 				console.log(`   Previous Balance: $${previousBalance.toFixed(2)}`);
 				console.log(`   Cumulative After: $${cumulativeBalance.toFixed(2)}`);
 			} else {
-				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [INACTIVE - EXCLUDED]`);
+				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [INACTIVE/EXPIRED]`);
 				console.log(`   Status: ${isExpired ? 'Expired' : 'Manually Inactive'}`);
+				console.log(`   (Still included in cumulative calculation to offset withdrawals)`);
 			}
 
 			// Store breakdown for ALL disbursements (for transparency)
@@ -3732,7 +3732,7 @@ const calculateUserPayout = async (userData) => {
 				cumulativeAfterThis: cumulativeBalance.toFixed(2),
 				isActive: isActive,
 				isExpired: isExpired,
-				includedInCalculation: isActive,  // ✅ New field to show if it's counted
+				includedInCalculation: true,  // ✅ All are now included to ensure math consistency
 				order: index + 1
 			});
 		});
@@ -3745,7 +3745,7 @@ const calculateUserPayout = async (userData) => {
 		console.log(`Active Disbursements: ${activeCount}`);
 		console.log(`Inactive/Expired Disbursements: ${inactiveCount}`);
 		console.log(`User Share: ${(sharePercentage * 100).toFixed(3)}%`);
-		console.log(`Cumulative Eligible (Active Only): $${totalEligible.toFixed(2)}`);
+		console.log(`Cumulative Eligible (All Included): $${totalEligible.toFixed(2)}`);
 		console.log(`Total Withdrawn: $${totalWithdrawn.toFixed(2)}`);
 		console.log(`Available Balance: $${availableAmount.toFixed(2)}`);
 		console.log('====================================================\n');
