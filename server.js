@@ -3671,97 +3671,128 @@ const calculateUserPayout = async (userData) => {
 		console.log('💰 Total withdrawn (all time):', totalWithdrawn.toFixed(2));
 
 		// ============================================
-		// ✅ CUMULATIVE CALCULATION - ONLY ACTIVE DISBURSEMENTS
+		// ✅ PROJECT-WISE CUMULATIVE CALCULATION
 		// ============================================
-
-		let cumulativeBalance = 0;
-		const disbursementBreakdown = [];
-		let totalEligible = 0;
-		let activeCount = 0;
-		let inactiveCount = 0;
+		
+		// Map to store stats per project
+		const projectBreakdown = {};
+		
+		// For now, as per user instructions, all existing NFTs in totalMinted belong to "Hope Coin KK NFTs"
+		// In the future, this mapping will be dynamic based on the user's actual NFT collection.
+		const userProjectOwnership = {
+			"Hope Coin KK NFTs": userNFTsOwned,
+			"Hope Coin": userNFTsOwned, // Handle variants
+			"Hope KK": userNFTsOwned    // Handle variants
+		};
 
 		allDisbursements.forEach((disbursement, index) => {
 			const disbursementId = disbursement.disbursementId;
 			const disbursementAmount = disbursement.totalLimit || 0;
+			const disbursementProject = disbursement.projectName || "Hope Coin KK NFTs";
+			
+			// Identify how many NFTs the user owns in THIS specific project
+			// We use a case-insensitive check and normalization for "Hope Coin" variants
+			let projectNFTs = 0;
+			if (disbursementProject.toLowerCase().includes("hope coin") || disbursementProject.toLowerCase().includes("hope kk")) {
+				projectNFTs = userNFTsOwned;
+			} else if (userProjectOwnership[disbursementProject]) {
+				projectNFTs = userProjectOwnership[disbursementProject];
+			}
 
-			// Check if expired
+			// Initialize project in breakdown if not exists
+			if (!projectBreakdown[disbursementProject]) {
+				projectBreakdown[disbursementProject] = {
+					projectName: disbursementProject,
+					nftsOwned: projectNFTs,
+					totalEligible: 0,
+					totalWithdrawn: 0,
+					availableBalance: 0,
+					disbursementsCount: 0
+				};
+			}
+
+			// Check if active (for reference, though we include all for math)
 			let isExpired = false;
 			if (disbursement.toDate) {
 				const endDate = new Date(disbursement.toDate);
 				const endDateStr = endDate.toISOString().split('T')[0];
 				isExpired = todayStr > endDateStr;
 			}
-
-			// Check if active (not manually marked inactive AND not expired)
 			const isActive = disbursement.isActive === true && !isExpired;
 
+			// Calculate earnings for THIS disbursement based on project-specific NFT ownership
+			const earnedFromThis = (disbursementAmount * projectNFTs) / totalSupply;
+			
+			// Update project totals
+			projectBreakdown[disbursementProject].totalEligible += earnedFromThis;
+			projectBreakdown[disbursementProject].disbursementsCount++;
+			
 			if (isActive) {
-				activeCount++;
-			} else {
-				inactiveCount++;
+				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [${disbursementProject}] [ACTIVE]`);
 			}
-
-			// Calculate earnings for ALL disbursements (including expired ones) 
-			// to ensure the cumulative balance correctly offsets all-time withdrawals.
-			const earnedFromThis = disbursementAmount * sharePercentage;
-			const previousBalance = cumulativeBalance;
-			cumulativeBalance += earnedFromThis;
-			totalEligible = cumulativeBalance;
-
-			if (isActive) {
-				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [ACTIVE]`);
-				console.log(`   Amount: $${disbursementAmount}`);
-				console.log(`   Earned: $${earnedFromThis.toFixed(2)}`);
-				console.log(`   Previous Balance: $${previousBalance.toFixed(2)}`);
-				console.log(`   Cumulative After: $${cumulativeBalance.toFixed(2)}`);
-			} else {
-				console.log(`📋 Disbursement ${index + 1}: ${disbursementId} [INACTIVE/EXPIRED]`);
-				console.log(`   Status: ${isExpired ? 'Expired' : 'Manually Inactive'}`);
-				console.log(`   (Still included in cumulative calculation to offset withdrawals)`);
-			}
-
-			// Store breakdown for ALL disbursements (for transparency)
-			disbursementBreakdown.push({
-				disbursementId: disbursementId,
-				period: disbursement.period || 'N/A',
-				fromDate: disbursement.fromDate || 'N/A',
-				toDate: disbursement.toDate || 'N/A',
-				totalAmount: disbursementAmount,
-				earnedFromThis: earnedFromThis.toFixed(2),
-				previousBalance: index === 0 ? '0.00' : disbursementBreakdown[index - 1]?.cumulativeAfterThis || '0.00',
-				cumulativeAfterThis: cumulativeBalance.toFixed(2),
-				isActive: isActive,
-				isExpired: isExpired,
-				includedInCalculation: true,  // ✅ All are now included to ensure math consistency
-				order: index + 1
-			});
 		});
 
-		// ✅ FINAL AVAILABLE = CUMULATIVE ELIGIBLE (from active only) - TOTAL WITHDRAWN
-		const availableAmount = Math.max(0, cumulativeBalance - totalWithdrawn);
+		// Calculate withdrawals PER PROJECT
+		// We use the disbursementId in each payout to find which project the withdrawal was for
+		const payouts = withdrawalData.payouts || [];
+		payouts.forEach(payout => {
+			if (payout.status === 'success' || payout.status === 'completed' || payout.status === 'SUCCESS') {
+				const dId = payout.disbursementId;
+				const amount = parseFloat(payout.amount) || 0;
+				
+				// Find which project this disbursement belonged to
+				const relatedDisbursement = allDisbursements.find(d => d.disbursementId === dId);
+				const pName = relatedDisbursement ? (relatedDisbursement.projectName || "Hope Coin KK NFTs") : "Hope Coin KK NFTs";
+				
+				if (!projectBreakdown[pName]) {
+					projectBreakdown[pName] = {
+						projectName: pName,
+						nftsOwned: 0,
+						totalEligible: 0,
+						totalWithdrawn: 0,
+						availableBalance: 0,
+						disbursementsCount: 0
+					};
+				}
+				
+				projectBreakdown[pName].totalWithdrawn += amount;
+			}
+		});
 
-		console.log('\n📊 ========== CUMULATIVE CALCULATION SUMMARY ==========');
-		console.log(`Total Disbursements: ${allDisbursements.length}`);
-		console.log(`Active Disbursements: ${activeCount}`);
-		console.log(`Inactive/Expired Disbursements: ${inactiveCount}`);
-		console.log(`User Share: ${(sharePercentage * 100).toFixed(3)}%`);
-		console.log(`Cumulative Eligible (All Included): $${totalEligible.toFixed(2)}`);
-		console.log(`Total Withdrawn: $${totalWithdrawn.toFixed(2)}`);
-		console.log(`Available Balance: $${availableAmount.toFixed(2)}`);
+		// Finalize balances for each project
+		let finalTotalAvailable = 0;
+		let finalTotalEligible = 0;
+		
+		Object.keys(projectBreakdown).forEach(pName => {
+			const project = projectBreakdown[pName];
+			project.availableBalance = Math.max(0, project.totalEligible - project.totalWithdrawn);
+			
+			// Round values
+			project.totalEligible = Number(project.totalEligible.toFixed(2));
+			project.totalWithdrawn = Number(project.totalWithdrawn.toFixed(2));
+			project.availableBalance = Number(project.availableBalance.toFixed(2));
+			
+			finalTotalAvailable += project.availableBalance;
+			finalTotalEligible += project.totalEligible;
+		});
+
+		console.log('\n📊 ========== PROJECT-WISE CALCULATION SUMMARY ==========');
+		console.log(`Total Projects Tracked: ${Object.keys(projectBreakdown).length}`);
+		console.log(`Total Eligible (All Projects): $${finalTotalEligible.toFixed(2)}`);
+		console.log(`Total Withdrawn (All Projects): $${totalWithdrawn.toFixed(2)}`);
+		console.log(`Total Available (All Projects): $${finalTotalAvailable.toFixed(2)}`);
 		console.log('====================================================\n');
 
-		const result = {
-			availableAmount: Number(availableAmount.toFixed(2)),
-			totalEligible: Number(totalEligible.toFixed(2)),
+		return {
+			availableAmount: Number(finalTotalAvailable.toFixed(2)),
+			totalEligible: Number(finalTotalEligible.toFixed(2)),
 			totalWithdrawn: Number(totalWithdrawn.toFixed(2)),
 			sharePercentage: Number((sharePercentage * 100).toFixed(3)),
 			totalSupply: Number(totalSupply),
 			userNFTsOwned: Number(userNFTsOwned),
 			totalDisbursements: allDisbursements.length,
-			activeDisbursements: activeCount,
-			inactiveDisbursements: inactiveCount,
-			disbursementBreakdown: disbursementBreakdown,
-			calculationMethod: 'cumulative-active-only'
+			projectBreakdown: projectBreakdown,
+			calculationMethod: 'project-wise-cumulative'
 		};
 
 		console.log('✅ Final calculation result:', result);
@@ -4433,11 +4464,12 @@ app.get('/api/paypal/:walletAddress', cors(corsOptions), async (req, res) => {
 app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (req, res) => {
 	try {
 		const walletAddress = req.params.walletAddress;
-		const { amount: requestedAmount } = req.body;
+		const { amount: requestedAmount, projectName } = req.body;
 
 		console.log('💰 Withdrawal request:', {
 			wallet: walletAddress,
-			requestedAmount: requestedAmount
+			requestedAmount: requestedAmount,
+			projectName: projectName
 		});
 
 		// Get PayPal data
@@ -4464,7 +4496,7 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			});
 		}
 
-		// Get user data and calculate CUMULATIVE available payout
+		// Get user data and calculate PROJECT-WISE available payout
 		const userSnapshot = await db.collection('users')
 			.where('walletAddress', '==', walletAddress)
 			.get();
@@ -4475,17 +4507,24 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 
 		const userData = userSnapshot.docs[0].data();
 
-		// ✅ Calculate CUMULATIVE available payout
+		// ✅ Calculate project-wise available payout
 		const payoutCalculation = await calculateUserPayout(userData);
 
 		if (payoutCalculation.error) {
 			return res.status(400).json({ error: payoutCalculation.error });
 		}
 
-		const availableAmount = Number(payoutCalculation.availableAmount) || 0;
-		const withdrawAmount = requestedAmount ? parseFloat(requestedAmount) : availableAmount;
+		// Determine available amount based on project if specified
+		let availableAmount = 0;
+		if (projectName && payoutCalculation.projectBreakdown && payoutCalculation.projectBreakdown[projectName]) {
+			availableAmount = payoutCalculation.projectBreakdown[projectName].availableBalance;
+			console.log(`📊 Project [${projectName}] Available amount:`, availableAmount.toFixed(2));
+		} else {
+			availableAmount = Number(payoutCalculation.availableAmount) || 0;
+			console.log('📊 Total CUMULATIVE Available amount:', availableAmount.toFixed(2));
+		}
 
-		console.log('📊 CUMULATIVE Available amount:', availableAmount.toFixed(2));
+		const withdrawAmount = requestedAmount ? parseFloat(requestedAmount) : availableAmount;
 		console.log('💵 Withdrawal amount:', withdrawAmount.toFixed(2));
 
 		// Validate withdrawal amount
@@ -4495,22 +4534,40 @@ app.post('/api/paypal/:walletAddress/request-payout', cors(corsOptions), async (
 			});
 		}
 
-		if (withdrawAmount > availableAmount) {
+		if (withdrawAmount > availableAmount + 0.01) { // Tiny buffer for rounding
 			return res.status(400).json({
 				error: `Requested amount exceeds available balance. Requested: $${withdrawAmount.toFixed(2)}, Available: $${availableAmount.toFixed(2)}`
 			});
 		}
 
-		// Get CURRENT ACTIVE disbursement for pool deduction
-		const currentDisbursementQuery = await db.collection('disbursement_history')
-			.where('isActive', '==', true)
-			.limit(1)
-			.get();
+		// Get CURRENT ACTIVE disbursement for this project
+		let currentDisbursementQuery;
+		if (projectName) {
+			currentDisbursementQuery = await db.collection('disbursement_history')
+				.where('projectName', '==', projectName)
+				.where('isActive', '==', true)
+				.limit(1)
+				.get();
+		} else {
+			currentDisbursementQuery = await db.collection('disbursement_history')
+				.where('isActive', '==', true)
+				.limit(1)
+				.get();
+		}
 
 		if (currentDisbursementQuery.empty) {
-			return res.status(400).json({
-				error: 'No active disbursement found. Contact administrator.'
-			});
+			// Fallback to any active if project-specific not found (for legacy support)
+			const fallbackQuery = await db.collection('disbursement_history')
+				.where('isActive', '==', true)
+				.limit(1)
+				.get();
+				
+			if (fallbackQuery.empty) {
+				return res.status(400).json({
+					error: 'No active disbursement found. Contact administrator.'
+				});
+			}
+			currentDisbursementQuery = fallbackQuery;
 		}
 
 		const currentDisbursementDoc = currentDisbursementQuery.docs[0];
